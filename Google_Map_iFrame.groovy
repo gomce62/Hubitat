@@ -56,7 +56,7 @@ preferences {
     
    }
 metadata {
-    definition (name: "Google Map iFrame", namespace: "gomce62", author: "Chris Feduniw", importUrl: "https://raw.githubusercontent.com/gomce62/Hubitat/Drivers/Google_Map_iFrame.groovy") {
+    definition (name: "Google Map iFrame", namespace: "gomce62", author: "gomce62", importUrl: "https://raw.githubusercontent.com/gomce62/Hubitat/Drivers/Google_Map_iFrame.groovy") {
         capability "Actuator"
         command "SetLatitudeLongitude", ["number","number"]
         attribute "iFrame", "text"
