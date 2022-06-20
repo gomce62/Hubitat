@@ -23,10 +23,10 @@
  *     2   Update the Map type parameter field for the type of map you want displayed if you want something other than the default view of normal map
  *     3   Enter in the latitude and longitude coorindates for the Map you want to embed and/or create a Hubitat Rule to auotmatically update the latitude
  *         and longitude commands each time some othe device attributes change
- *     3   add this device to your dashboard, select the attribute and choose the "iFrame" attribute
+ *     4   add this device to your dashboard, select the attribute and choose the "iFrame" attribute
  *
  *	   optional:
- *     4   update the css to style the iframe tile on the dashboard:
+ *     5   update the css to style the iframe tile on the dashboard:
  *
  *		// replace '#tile-33' with this driver/device on your dashboard
  *	
@@ -47,8 +47,8 @@
  *
  *    Date        Who            What
  *    ----        ---            ----
- * 	 6-19-22	gomce62			initial release
- *   6-19-22    gomce62         add parameter to enter type of map to display
+ *   6-19-22	gomce62	        initial release
+ *   6-19-22    gomce62         added parameter to enter type of map to display
  * 	  
  */
         
