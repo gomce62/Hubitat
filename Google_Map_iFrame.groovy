@@ -1,5 +1,5 @@
 /**
- *  dashboard Google Map iFrame
+ *  dashboard Gogole Map iFrame
  *
  *
  *  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
@@ -19,8 +19,9 @@
  *
  *
  *  Directions:  
- *     1   Create a virtual device with this driver.  
- *     2   Enter in the latitude and longitude coorindates for the Map you want to embed and/or create a Hubitat Rule to auotmatically update the latitude
+ *     1   Create a virtual device with this driver.
+ *     2   Update the Map type parameter field for the type of map you want displayed if you want something other than the default view of normal map
+ *     3   Enter in the latitude and longitude coorindates for the Map you want to embed and/or create a Hubitat Rule to auotmatically update the latitude
  *         and longitude commands each time some othe device attributes change
  *     3   add this device to your dashboard, select the attribute and choose the "iFrame" attribute
  *
@@ -46,17 +47,18 @@
  *
  *    Date        Who            What
  *    ----        ---            ----
- * 	 6-19-22	gomce62			initial release 
+ * 	 6-19-22	gomce62			initial release
+ *   6-19-22    gomce62         add parameter to enter type of map to display
  * 	  
  */
         
 
 preferences {
         input name: "txtEnable", type: "bool", title: "Enable descriptionText logging", defaultValue: true 
-    
-   }
+        input("maptype", "text", title: "Enter how you want to view your map m – normal, k – satellite, h – hybrid",  defaultValue: m) 
+}
 metadata {
-    definition (name: "Google Map iFrame", namespace: "gomce62", author: "gomce62", importUrl: "https://raw.githubusercontent.com/gomce62/Hubitat/Drivers/Google_Map_iFrame.groovy") {
+    definition (name: "Google Map iFrame", namespace: "gomce62", author: "Chris Feduniw", importUrl: "https://raw.githubusercontent.com/gomce62/Hubitat/Drivers/Google_Map_iFrame.groovy") {
         capability "Actuator"
         command "SetLatitudeLongitude", ["number","number"]
         attribute "iFrame", "text"
@@ -69,7 +71,7 @@ metadata {
 
 def installed() {
 	log.warn "installed..."
-    sendEvent(name: "iFrame", value: "<div style='height: 100%; width: 100%'><iframe src='https://maps.google.com/maps?q=0,0&hl=es;z=14&output=embed' style='height: 100%; width:100%; border: none;'></iframe><div>")
+    sendEvent(name: "iFrame", value: "<div style='height: 100%; width: 100%'><iframe src='https://maps.google.com/maps?q=0,0&t=${maptype}&hl=es;z=0&output=embed' style='height: 100%; width:100%; border: none;'></iframe><div>")
     }
 
 
@@ -79,5 +81,5 @@ def SetLatitudeLongitude(lat,lon) {
     if (txtEnable) log.info "${descriptionText}"
     sendEvent(name: "longitude", value:lon)
     sendEvent(name: "latitude", value:lat)
-    sendEvent(name: "iFrame", value: "<div style='height: 100%; width: 100%'><iframe src='https://maps.google.com/maps?q=${lat},${lon}&hl=es;z=14&output=embed' style='height: 100%; width:100%; border: none;'></iframe><div>")
+    sendEvent(name: "iFrame", value: "<div style='height: 100%; width: 100%'><iframe src='https://maps.google.com/maps?q=${lat},${lon}&t=${maptype}&hl=es;z=14&output=embed' style='height: 100%; width:100%; border: none;'></iframe><div>")
 }
