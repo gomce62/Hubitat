@@ -49,6 +49,7 @@
  *   6-19-22	gomce62  	Initial release 
  *   6-19-22    gomce62         Added parameter to enter type of map to display
  *   6-20-22    gomce62         Updated code for Map Type and added parameter for Map Zoom level and updated commands with code contributions from kahn-hubitat and Baz2473  
+ *   6-21-22    gomce62         added range to MapZoomLevel to prevent entry of value outside of range
  * 	  
  */
         
