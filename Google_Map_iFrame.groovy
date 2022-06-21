@@ -56,7 +56,7 @@
 preferences {
         input name: "txtEnable", type: "bool", title: "Enable descriptionText logging", defaultValue: true 
         input "mapType", "enum", title: "Select your desired map type", options: ["h":"Hybrid","k":"Satellite","n":"Normal"], defaultValue: "h"    
-        input "MapZoomLevel", "number", title: "Enter a value between 1-21 (default is 14) to set Zoom Level for Google Maps", defaultValue:14
+        input "MapZoomLevel", "number",range: "1..21" title: "Enter a value between 1-21 (default is 14) to set Zoom Level for Google Maps", defaultValue:14
 }
 metadata {
     definition (name: "Google Map iFrame", namespace: "gomce62", author: "gomce62", importUrl: "https://raw.githubusercontent.com/gomce62/Hubitat/Drivers/Google_Map_iFrame.groovy") {
