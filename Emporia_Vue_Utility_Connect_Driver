@@ -29,7 +29,7 @@
 
 import groovy.json.*
 import java.text.SimpleDateFormat
-importUrl: "https://github.com/gomce62/Hubitat/blob/Drivers/Emporia_Vue_Utility_Connect_Driver",
+importUrl:"https://raw.githubusercontent.com/ke7lvb/Emporia-Vue-Hubitat/main/emporia.groovy",
 
     metadata {
     definition(
