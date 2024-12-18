@@ -29,13 +29,13 @@
 
 import groovy.json.*
 import java.text.SimpleDateFormat
-importUrl:"https://raw.githubusercontent.com/gomce62/Hubitat/refs/heads/Drivers/Emporia_Vue_Utility_Connect_Driver",
 
     metadata {
     definition(
         name: "Emporia Vue Utility Connect Driver",
         namespace: "gomce62",
         author: "gomce62",
+        importUrl:"https://raw.githubusercontent.com/gomce62/Hubitat/refs/heads/Drivers/Emporia_Vue_Utility_Connect_Driver",
     ){
         capability "Refresh"
 
