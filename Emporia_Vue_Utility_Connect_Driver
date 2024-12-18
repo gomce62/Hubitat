@@ -1,0 +1,205 @@
+/**
+ *  Emporia Vue Utility Connect Driver
+ *
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
+ *  in compliance with the License. You may obtain a copy of the License at:
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software distributed under the License is distributed
+ *  on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License
+ *  for the specific language governing permissions and limitations under the License.
+ *
+ *  Special thanks goes to ke7lvb who created the original Emporia Vue driver for Hubitat that the majority of this driver code as leveraged. 
+ *  The original Emporia Vue driver is available at https://github.com/ke7lvb/Emporia-Vue-Hubitat
+ *
+ *  
+ *  This main purpose of this driver is to specifically pull the same engery usage information from the Emporia Vue Utility Connect device (https://shop.emporiaenergy.com/products/utility-connect) that 
+ *  is diplayed in the Emporia Vue Mobile App e.g. Amps being sent/consumed to the grid that can then be used in Hubitat Rules to control other devices. For example if Meter reads - 30 AMPs due to Solar Production
+ *  than set my car charger to 20 amps and charge car until Meter shows I'm consuming power from grid instead of sending power to the grid.
+ *
+ *
+ * Change History:
+ *
+ *    Date        Who            What
+ *    ----        ---            ----
+ *   12-18-24	gomce62  	Initial release 
+*/
+
+import groovy.json.*
+import java.text.SimpleDateFormat
+//importUrl: "https://raw.githubusercontent.com/ke7lvb/Emporia-Vue-Hubitat/main/emporia.groovy",
+
+    metadata {
+    definition(
+        name: "Emporia Vue Utility Connect Driver",
+        namespace: "gomce62",
+        author: "gomce62",
+    ){
+        capability "Refresh"
+
+        command "authToken", [[name: "Update Authtoken*", type: "STRING"]]
+        attribute "lastUpdate", "string"
+        attribute "KilowattHours", "number"
+        attribute "Dollars", "number"
+        attribute "AmpHours", "number"
+        attribute "Trees", "number"
+        attribute "GallonsOfGas", "number"
+        attribute "MilesDriven", "number"
+        attribute "Carbon", "number"
+    }
+    preferences {
+        input name: "logEnable", type: "bool", title: "Enable Info logging", defaultValue: true, description: ""
+        input name: "debugLog", type: "bool", title: "Enable Debug logging", defaultValue: true, description: ""
+        input name: "jsonState", type: "bool", title: "Show JSON state", defaultValue: true, description: ""
+        input("scale", "enum", title: "Scale", options: [
+            ["1S": "1 Second"],
+            ["1MIN": "1 Minute"],
+            ["1H": "1 Hour"],
+            ["1D": "1 Day"],
+            ["1W": "1 Week"],
+            ["1Mon": "1 Month"],
+            ["1Y": "1 Year"]
+            ], required: true, defaultValue: "1H")
+        input("refresh_interval", "enum", title: "How often to refresh the Emporia data", options: [
+            0: "Do NOT update",
+            1: "1 Minute",
+            5: "5 Minutes",
+            10: "10 Minutes",
+            15: "15 Minutes",
+            20: "20 Minutes",
+            30: "30 Minutes",
+            45: "45 Minutes",
+            60: "1 Hour"
+            ], required: true, defaultValue: "60")
+    }
+}
+
+def version(){ return "1.0.0" }
+
+def installed(){
+    if(logEnable) log.info "Driver installed"
+    state.version = version()
+    state.deviceGID = []
+    state.deviceNames = []
+}
+
+def uninstalled() {
+    unschedule(refresh)
+    if(logEnable) log.info "Driver uninstalled"
+}
+
+def updated(){
+    if (logEnable) log.info "Settings updated"
+    if (settings.refresh_interval != "0") {
+        if (settings.refresh_interval == "60") {
+            schedule("7 0 * ? * * *", refresh, [overwrite: true])
+        } else {
+            schedule("7 */${settings.refresh_interval} * ? * *", refresh, [overwrite: true])
+        }
+    }else{
+        unschedule(refresh)
+    }
+    state.version = version()
+    if(jsonState == false){
+        state.remove("JSON")
+    }
+}
+
+def getDeviceGid(){
+    def host = "https://api.emporiaenergy.com/"
+    def command = "customers/devices"
+    def customer = httpGet([uri: "${host}${command}", headers:['authtoken':state.token]]){resp -> resp.data}
+    if(debugLog) log.debug JsonOutput.toJson(customer.devices)
+    def deviceGID = []
+    def deviceNames = []
+    customer.devices.each{ value ->
+        if(debugLog) log.debug value.deviceGid
+        deviceGID.add(value.deviceGid)
+        value.devices.channels.each{ next_value ->
+            deviceNames.add(next_value.name)
+        }
+    }
+    state.deviceGID = deviceGID
+    deviceNames = deviceNames - null - ''
+    state.deviceNames = deviceNames
+}
+
+def refresh() {
+    if(state.deviceGID){
+        def Gid_string = state.deviceGID.join("+")
+        def outputTZ = TimeZone.getTimeZone('UTC')
+        def instant = new Date().format("yyyy-MM-dd'T'HH:mm:ss'Z'",outputTZ)
+        def host = "https://api.emporiaenergy.com/"
+        def scaleConverted = [
+            "1S": "1 Second",
+            "1MIN": "Minute",
+            "1H": "Hour",
+            "1D": "Day",
+            "1W": "Week",
+            "1Mon": "Month",
+            "1Y": "Year"
+        ][scale] ?: "Hour"
+
+        ["KilowattHours", "Dollars", "AmpHours", "Trees", "GallonsOfGas", "MilesDriven", "Carbon"].each { energyUnit ->
+            def command = "AppAPI?apiMethod=getDeviceListUsages&deviceGids=${Gid_string}&instant=${instant}&scale=${scale}&energyUnit=${energyUnit}"
+            if(debugLog) log.debug "${host}${command}"
+            def JSON = httpGet([uri: "${host}${command}", headers:['authtoken':state.token]]){resp -> resp.data}
+            if(jsonState){
+                state.JSON = JsonOutput.toJson(JSON)
+            }
+            def devices = JSON.deviceListUsages.devices
+            def combinedTotals = 0
+
+            devices.each{ value ->
+                value.channelUsages.each{ next_value ->
+                    if(debugLog) log.debug next_value
+                    def usage = next_value.usage
+                    if(usage == null){
+                        if(debugLog) log.debug "null value encountered on ${next_value.name}"
+                        return
+                    }
+                    def Wh = roundToTwoDecimalPlaces(convertToWh(usage) ?: 0)
+                    combinedTotals += Wh
+                }
+            }
+            sendEvent(name: energyUnit, value: "${roundToTwoDecimalPlaces(combinedTotals / 1000)} ${energyUnit} in the last reported ${scaleConverted}")
+ 
+   
+        }
+
+   
+        def now = new Date()
+        def dateFormat = new SimpleDateFormat("MM-dd-yyyy h:mm:ss a")
+        def formattedDate = dateFormat.format(now)
+        state.lastUpdate = formattedDate
+        sendEvent(name: "lastUpdate", value: formattedDate)
+    }else{
+        log.info "device Gid not found. Please run the command to Get Device Gid"
+    }
+}
+
+def authToken(token){
+    state.token = token
+    def now = new Date()
+    def dateFormat = new SimpleDateFormat("MM-dd-yyyy h:mm:ss a")
+    state.lastTokenUpdate = dateFormat.format(now)
+}
+
+def convertToWh(usage){
+    if(usage != null){
+        switch(scale){
+            case "1S":
+                return Math.round(usage * 60 * 60 * 1000)
+            case "1MIN":
+                return Math.round(usage * 60 * 1000)
+            default:
+                return Math.round(usage * 1000)
+        }
+    }
+}
+
+def roundToTwoDecimalPlaces(value) {
+    return Math.round(value * 100) / 100
+}
