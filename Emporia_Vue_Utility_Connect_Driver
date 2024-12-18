@@ -15,9 +15,9 @@
  *  The original Emporia Vue driver is available at https://github.com/ke7lvb/Emporia-Vue-Hubitat
  *
  *  
- *  This main purpose of this driver is to specifically pull the same engery usage information from the Emporia Vue Utility Connect device (https://shop.emporiaenergy.com/products/utility-connect) that 
- *  is diplayed in the Emporia Vue Mobile App e.g. Amps being sent/consumed to the grid that can then be used in Hubitat Rules to control other devices. For example if Meter reads - 30 AMPs due to Solar Production
- *  than set my car charger to 20 amps and charge car until Meter shows I'm consuming power from grid instead of sending power to the grid.
+ *  The main purpose of this driver is to specifically pull the same energy usage information from the Emporia Vue Utility Connect device (https://shop.emporiaenergy.com/products/utility-connect) that 
+ *  is displayed in the Emporia Vue Mobile App e.g. Amps being sent/consumed to the grid that can then be used in Hubitat Rules to control other devices. For example, if the Meter reads - 30 AMPs due to Solar Production
+ *  then set my car charger to 20 amps and charge the car until the Meter shows I'm consuming power from the grid instead of sending power to the grid.
  *
  *
  * Change History:
@@ -29,7 +29,7 @@
 
 import groovy.json.*
 import java.text.SimpleDateFormat
-//importUrl: "https://raw.githubusercontent.com/ke7lvb/Emporia-Vue-Hubitat/main/emporia.groovy",
+importUrl: "https://github.com/gomce62/Hubitat/blob/Drivers/Emporia_Vue_Utility_Connect_Driver",
 
     metadata {
     definition(
