@@ -164,7 +164,7 @@ def refresh() {
                     combinedTotals += Wh
                 }
             }
-            sendEvent(name: energyUnit, value: "${roundToTwoDecimalPlaces(combinedTotals / 1000)} ${energyUnit} in the last reported ${scaleConverted}")
+            sendEvent(name: energyUnit, value: "${roundToTwoDecimalPlaces(combinedTotals / 1000)}")
  
    
         }
@@ -176,7 +176,7 @@ def refresh() {
         state.lastUpdate = formattedDate
         sendEvent(name: "lastUpdate", value: formattedDate)
     }else{
-        log.info "device Gid not found. Please run the command to Get Device Gid"
+        log.info "device Gid not found. Please refresh Authtoken"
     }
 }
 
