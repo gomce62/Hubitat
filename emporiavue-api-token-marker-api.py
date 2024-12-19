@@ -4,7 +4,7 @@ import requests
 
 vue = pyemvue.PyEmVue()
 #create the auth token and store it in keys.json
-vue.login(username='gomce62.web@gmail.com', password='g0&86KgpLr^Hd9&', token_storage_file='keys.json')
+vue.login(username='enter userid', password='enter PW', token_storage_file='keys.json')
 
 #retrieve the auth_token from keys.json
 with open('keys.json')as f:
