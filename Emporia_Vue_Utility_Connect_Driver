@@ -132,16 +132,7 @@ def refresh() {
         def outputTZ = TimeZone.getTimeZone('UTC')
         def instant = new Date().format("yyyy-MM-dd'T'HH:mm:ss'Z'",outputTZ)
         def host = "https://api.emporiaenergy.com/"
-        def scaleConverted = [
-            "1S": "1 Second",
-            "1MIN": "Minute",
-            "1H": "Hour",
-            "1D": "Day",
-            "1W": "Week",
-            "1Mon": "Month",
-            "1Y": "Year"
-        ][scale] ?: "Hour"
-
+      
         ["KilowattHours", "Dollars", "AmpHours", "Trees", "GallonsOfGas", "MilesDriven", "Carbon"].each { energyUnit ->
             def command = "AppAPI?apiMethod=getDeviceListUsages&deviceGids=${Gid_string}&instant=${instant}&scale=${scale}&energyUnit=${energyUnit}"
             if(debugLog) log.debug "${host}${command}"
