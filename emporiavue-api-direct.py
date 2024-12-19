@@ -1,9 +1,9 @@
 import requests
 import json
 
-# Replace with your Emporia Vue credentials
-username = 'gomce62.web@gmail.com'
-password = 'g0&86KgpLr^Hd9&'
+# Replace with your Emporia Vue credentials and delete < >
+username = '<enter user id>'
+password = '<enter pW>'
 
 # Authenticate and get tokens
 auth_url = 'https://api.emporiaenergy.com/customers/auth'
