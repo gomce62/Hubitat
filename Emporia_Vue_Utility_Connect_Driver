@@ -24,7 +24,7 @@
  *
  *    Date        Who            What
  *    ----        ---            ----
- *   12-18-24	gomce62  	Initial release 
+ *   12-19-24	gomce62  	Initial release 
 */
 
 import groovy.json.*
@@ -32,14 +32,16 @@ import java.text.SimpleDateFormat
 
     metadata {
     definition(
-        name: "Emporia Vue Utility Connect Driver",
+        name: "Emporia Vue Utilty Connect Driver",
         namespace: "gomce62",
-        author: "gomce62",
+        author: "Chris Feduniw",
         importUrl:"https://raw.githubusercontent.com/gomce62/Hubitat/refs/heads/Drivers/Emporia_Vue_Utility_Connect_Driver",
     ){
         capability "Refresh"
 
         command "authToken", [[name: "Update Authtoken*", type: "STRING"]]
+        command "getDeviceGid"
+        
         attribute "lastUpdate", "string"
         attribute "KilowattHours", "number"
         attribute "Dollars", "number"
@@ -108,23 +110,28 @@ def updated(){
 }
 
 def getDeviceGid(){
-    def host = "https://api.emporiaenergy.com/"
-    def command = "customers/devices"
-    def customer = httpGet([uri: "${host}${command}", headers:['authtoken':state.token]]){resp -> resp.data}
-    if(debugLog) log.debug JsonOutput.toJson(customer.devices)
-    def deviceGID = []
-    def deviceNames = []
-    customer.devices.each{ value ->
-        if(debugLog) log.debug value.deviceGid
-        deviceGID.add(value.deviceGid)
-        value.devices.channels.each{ next_value ->
-            deviceNames.add(next_value.name)
-        }
-    }
-    state.deviceGID = deviceGID
-    deviceNames = deviceNames - null - ''
-    state.deviceNames = deviceNames
+	host = "https://api.emporiaenergy.com/"
+    command = "customers/devices"
+	customer = httpGet([uri: "${host}${command}", headers:['authtoken':state.token]]){resp -> def respData = resp.data}
+	if(debugLog) log.debug JsonOutput.toJson(customer.devices)
+	deviceGID = []
+	deviceNames = []
+	customer.devices.each{ value ->
+		if(debugLog) log.debug value.deviceGid
+		
+		deviceGID.add(value.deviceGid)
+		
+		channels = value.devices.channels
+		channels.each{ next_value ->
+			deviceNames.add(next_value.name)
+		}
+	}
+	state.deviceGID = deviceGID
+	deviceNames = deviceNames - null
+	deviceNames = deviceNames - ''
+	state.deviceNames = deviceNames
 }
+
 
 def refresh() {
     if(state.deviceGID){
