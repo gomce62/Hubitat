@@ -16,7 +16,7 @@
  *
  *  
  *  The main purpose of this driver is to specifically pull the same energy usage information from the Emporia Vue Utility Connect device (https://shop.emporiaenergy.com/products/utility-connect) that 
- *  is displayed in the Emporia Vue Mobile App e.g. Amps being sent/consumed to the grid that can then be used in Hubitat Rules to control other devices. For example, if the Meter reads -30 AMPs due to Solar Production
+ *  is displayed in the Emporia Vue Mobile App e.g. Amps being sent/consumed to the grid that can then be used in Hubitat Rules to control other devices. For example, if the Meter reads - 30 AMPs due to Solar Production
  *  then set my car charger to 20 amps and charge the car until the Meter shows I'm consuming power from the grid instead of sending power to the grid.
  *
  *
