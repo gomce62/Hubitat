@@ -1,7 +1,6 @@
 /**
  *  Emporia Vue Utility Connect Driver
  *
- *
  *  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
  *  in compliance with the License. You may obtain a copy of the License at:
  *
@@ -11,37 +10,40 @@
  *  on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License
  *  for the specific language governing permissions and limitations under the License.
  *
- *  Special thanks goes to ke7lvb who created the original Emporia Vue driver for Hubitat that the majority of this driver code as leveraged. 
+ *  Special thanks goes to ke7lvb who created the original Emporia Vue driver for Hubitat that the majority of this driver code is leveraged.
  *  The original Emporia Vue driver is available at https://github.com/ke7lvb/Emporia-Vue-Hubitat
+ *  See the Hubitat Community thread https://community.hubitat.com/t/release-emporia-vue-driver-for-hubitat/90907 
+ *  for information on how to install the Python Script to get the EmporiaVue Authentication API Key
+ *  that is required for this driver. Emporia does not have an official API and this driver may stop working at any time
  *
- *  
- *  The main purpose of this driver is to specifically pull the same energy usage information from the Emporia Vue Utility Connect device (https://shop.emporiaenergy.com/products/utility-connect) that 
+ *  The main purpose of this driver is to specifically pull the same energy usage information from the Emporia Vue Utility Connect device (https://shop.emporiaenergy.com/products/utility-connect) that
  *  is displayed in the Emporia Vue Mobile App e.g. Amps being sent/consumed to the grid that can then be used in Hubitat Rules to control other devices. For example, if the Meter reads - 30 AMPs due to Solar Production
  *  then set my car charger to 20 amps and charge the car until the Meter shows I'm consuming power from the grid instead of sending power to the grid.
- *
  *
  * Change History:
  *
  *    Date        Who            What
  *    ----        ---            ----
- *   12-19-24	gomce62  	Initial release 
-*/
+ *   12-21-24    gomce62       Initial release
+ */
 
 import groovy.json.*
 import java.text.SimpleDateFormat
+import java.util.TimeZone
 
-    metadata {
+metadata {
     definition(
-        name: "Emporia Vue Utilty Connect Driver",
+        name: "Emporia Vue Utility Connect Driver",
         namespace: "gomce62",
         author: "Chris Feduniw",
         importUrl:"https://raw.githubusercontent.com/gomce62/Hubitat/refs/heads/Drivers/Emporia_Vue_Utility_Connect_Driver",
     ){
+        capability "Actuator"
         capability "Refresh"
 
         command "authToken", [[name: "Update Authtoken*", type: "STRING"]]
         command "getDeviceGid"
-        
+
         attribute "lastUpdate", "string"
         attribute "KilowattHours", "number"
         attribute "Dollars", "number"
@@ -50,6 +52,7 @@ import java.text.SimpleDateFormat
         attribute "GallonsOfGas", "number"
         attribute "MilesDriven", "number"
         attribute "Carbon", "number"
+        attribute "Scale", "string"  
     }
     preferences {
         input name: "logEnable", type: "bool", title: "Enable Info logging", defaultValue: true, description: ""
@@ -63,7 +66,7 @@ import java.text.SimpleDateFormat
             ["1W": "1 Week"],
             ["1Mon": "1 Month"],
             ["1Y": "1 Year"]
-            ], required: true, defaultValue: "1H")
+        ], required: true, defaultValue: "1H")
         input("refresh_interval", "enum", title: "How often to refresh the Emporia data", options: [
             0: "Do NOT update",
             1: "1 Minute",
@@ -74,7 +77,7 @@ import java.text.SimpleDateFormat
             30: "30 Minutes",
             45: "45 Minutes",
             60: "1 Hour"
-            ], required: true, defaultValue: "60")
+        ], required: true, defaultValue: "60")
     }
 }
 
@@ -104,90 +107,108 @@ def updated(){
         unschedule(refresh)
     }
     state.version = version()
+    sendEvent(name: "Scale", value: scale)  
     if(jsonState == false){
         state.remove("JSON")
     }
 }
 
 def getDeviceGid(){
-	host = "https://api.emporiaenergy.com/"
+    host = "https://api.emporiaenergy.com/"
     command = "customers/devices"
-	customer = httpGet([uri: "${host}${command}", headers:['authtoken':state.token]]){resp -> def respData = resp.data}
-	if(debugLog) log.debug JsonOutput.toJson(customer.devices)
-	deviceGID = []
-	deviceNames = []
-	customer.devices.each{ value ->
-		if(debugLog) log.debug value.deviceGid
-		
-		deviceGID.add(value.deviceGid)
-		
-		channels = value.devices.channels
-		channels.each{ next_value ->
-			deviceNames.add(next_value.name)
-		}
-	}
-	state.deviceGID = deviceGID
-	deviceNames = deviceNames - null
-	deviceNames = deviceNames - ''
-	state.deviceNames = deviceNames
+    customer = httpGet([uri: "${host}${command}", headers:['authtoken':state.token]]){resp -> def respData = resp.data}
+    if(debugLog) log.debug JsonOutput.toJson(customer.devices)
+    deviceGID = []
+    deviceNames = []
+    customer.devices.each{ value ->
+        if(debugLog) log.debug value.deviceGid
+
+        deviceGID.add(value.deviceGid)
+
+        channels = value.devices.channels
+        channels.each{ next_value ->
+            deviceNames.add(next_value.name)
+        }
+    }
+    state.deviceGID = deviceGID
+    deviceNames = deviceNames - null
+    deviceNames = deviceNames - ''
+    state.deviceNames = deviceNames
 }
 
-
 def refresh() {
-    if(state.deviceGID){
+    if (state.deviceGID) {
         def Gid_string = state.deviceGID.join("+")
         def outputTZ = TimeZone.getTimeZone('UTC')
-        def instant = new Date().format("yyyy-MM-dd'T'HH:mm:ss'Z'",outputTZ)
+        def instant = new Date().format("yyyy-MM-dd'T'HH:mm:ss'Z'", outputTZ)
         def host = "https://api.emporiaenergy.com/"
-      
-        ["KilowattHours", "Dollars", "AmpHours", "Trees", "GallonsOfGas", "MilesDriven", "Carbon"].each { energyUnit ->
-            def command = "AppAPI?apiMethod=getDeviceListUsages&deviceGids=${Gid_string}&instant=${instant}&scale=${scale}&energyUnit=${energyUnit}"
-            if(debugLog) log.debug "${host}${command}"
-            def JSON = httpGet([uri: "${host}${command}", headers:['authtoken':state.token]]){resp -> resp.data}
-            if(jsonState){
-                state.JSON = JsonOutput.toJson(JSON)
-            }
-            def devices = JSON.deviceListUsages.devices
-            def combinedTotals = 0
 
-            devices.each{ value ->
-                value.channelUsages.each{ next_value ->
-                    if(debugLog) log.debug next_value
-                    def usage = next_value.usage
-                    if(usage == null){
-                        if(debugLog) log.debug "null value encountered on ${next_value.name}"
-                        return
-                    }
-                    def Wh = roundToTwoDecimalPlaces(convertToWh(usage) ?: 0)
-                    combinedTotals += Wh
-                }
-            }
-            sendEvent(name: energyUnit, value: "${roundToTwoDecimalPlaces(combinedTotals / 1000)}")
- 
-   
+        ["KilowattHours", "Dollars", "AmpHours", "Trees", "GallonsOfGas", "MilesDriven", "Carbon"].each { energyUnit ->
+            attemptRefresh([host: host, Gid_string: Gid_string, instant: instant, energyUnit: energyUnit, attempts: 0])
         }
 
-   
         def now = new Date()
         def dateFormat = new SimpleDateFormat("MM-dd-yyyy h:mm:ss a")
         def formattedDate = dateFormat.format(now)
         state.lastUpdate = formattedDate
         sendEvent(name: "lastUpdate", value: formattedDate)
-    }else{
+    } else {
         log.info "device Gid not found. Please refresh Authtoken and getDeviceGid"
     }
 }
 
-def authToken(token){
+def attemptRefresh(params) {
+    def host = params.host
+    def Gid_string = params.Gid_string
+    def instant = params.instant
+    def energyUnit = params.energyUnit
+    def attempts = params.attempts
+
+    def command = "AppAPI?apiMethod=getDeviceListUsages&deviceGids=${Gid_string}&instant=${instant}&scale=${scale}&energyUnit=${energyUnit}"
+    if (debugLog) log.debug "${host}${command}"
+    def JSON = httpGet([uri: "${host}${command}", headers: ['authtoken': state.token]]) { resp -> resp.data }
+    if (jsonState) {
+        state.JSON = JsonOutput.toJson(JSON)
+    }
+    def devices = JSON.deviceListUsages.devices
+    def combinedTotals = 0
+    def needsRetry = false
+
+  //The EmporiaVue API sometimes returns a null value due to server being busy. The following code attempts another refresh for x tries after waiting x seconds
+    devices.each { value ->
+        value.channelUsages.each { next_value ->
+            def usage = next_value.usage
+            if(debugLog) log.debug next_value
+            if (usage == null) {
+                if(debugLog) log.debug "null value encountered on ${next_value.name} will attempting another refresh"
+                needsRetry = true
+                if (attempts < 3) {
+                    runIn(10, attemptRefresh, [overwrite: false, data: [host: host, Gid_string: Gid_string, instant: instant, energyUnit: energyUnit, attempts: attempts + 1]])
+                    return
+                } else {
+                    log.error "null value encountered on ${next_value.name} after 3 attempts"
+                    return
+                }
+            }
+            def Wh = roundToTwoDecimalPlaces(convertToWh(usage) ?: 0)
+            combinedTotals += Wh
+        }
+    }
+    if (!needsRetry) {
+        sendEvent(name: energyUnit, value: "${roundToTwoDecimalPlaces(combinedTotals / 1000)}")
+    }
+}
+
+def authToken(token) {
     state.token = token
     def now = new Date()
     def dateFormat = new SimpleDateFormat("MM-dd-yyyy h:mm:ss a")
     state.lastTokenUpdate = dateFormat.format(now)
 }
 
-def convertToWh(usage){
-    if(usage != null){
-        switch(scale){
+def convertToWh(usage) {
+    if (usage != null) {
+        switch(scale) {
             case "1S":
                 return Math.round(usage * 60 * 60 * 1000)
             case "1MIN":
