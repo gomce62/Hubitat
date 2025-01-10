@@ -12,9 +12,7 @@
  *
  *  Special thanks goes to ke7lvb who created the original Emporia Vue driver for Hubitat that the majority of this driver code is leveraged.
  *  The original Emporia Vue driver is available at https://github.com/ke7lvb/Emporia-Vue-Hubitat
- *  See the Hubitat Community thread https://community.hubitat.com/t/release-emporia-vue-driver-for-hubitat/90907 
- *  for information on how to install the Python Script to get the EmporiaVue Authentication API Key
- *  that is required for this driver. Emporia does not have an official API and this driver may stop working at any time
+ *  Emporia does not have an official API and this driver may stop working at any time
  *
  *  The main purpose of this driver is to specifically pull the same energy usage information from the Emporia Vue Utility Connect device (https://shop.emporiaenergy.com/products/utility-connect) that
  *  is displayed in the Emporia Vue Mobile App e.g. Amps being sent/consumed to the grid that can then be used in Hubitat Rules to control other devices. For example, if the Meter reads - 30 AMPs due to Solar Production
@@ -25,6 +23,7 @@
  *    Date        Who            What
  *    ----        ---            ----
  *   12-21-24    gomce62       Initial release
+ *   01-07024    gomce62	   Added code to get EmporiaVue API Tokens based on code contributions from @amithalp and @ke7lvb
  */
 
 import groovy.json.*
@@ -40,10 +39,19 @@ metadata {
     ){
         capability "Actuator"
         capability "Refresh"
-
+        
+        capability "PowerSource"
+        capability "PowerMeter"
+        capability "EnergyMeter"
+        
+        
+        
         command "authToken", [[name: "Update Authtoken*", type: "STRING"]]
         command "getDeviceGid"
-
+        command "generateToken"
+        command "refreshToken"
+        
+        attribute "tokenExpiry", "string"        
         attribute "lastUpdate", "string"
         attribute "KilowattHours", "number"
         attribute "Dollars", "number"
@@ -58,6 +66,8 @@ metadata {
         input name: "logEnable", type: "bool", title: "Enable Info logging", defaultValue: true, description: ""
         input name: "debugLog", type: "bool", title: "Enable Debug logging", defaultValue: true, description: ""
         input name: "jsonState", type: "bool", title: "Show JSON state", defaultValue: true, description: ""
+        input name: "email", type: "string", title: "Emporia Email", required: true
+        input name: "password", type: "password", title: "Emporia Password", required: true
         input("scale", "enum", title: "Scale", options: [
             ["1S": "1 Second"],
             ["1MIN": "1 Minute"],
@@ -81,7 +91,7 @@ metadata {
     }
 }
 
-def version(){ return "1.0.0" }
+def version(){ return "1.1.0" }
 
 def installed(){
     if(logEnable) log.info "Driver installed"
@@ -111,29 +121,121 @@ def updated(){
     if(jsonState == false){
         state.remove("JSON")
     }
+
+    // Schedule token refresh
+    if (state.tokenExpiry) {
+        def refreshTime = (state.tokenExpiry - now() - 300000) / 1000 // Refresh 5 minutes before expiry
+        runIn(refreshTime.toInteger(), refreshToken)
+        if (logEnable) log.info "Token refresh scheduled in ${refreshTime.toInteger()} seconds"
+    }
+
+    state.version = version()
+    if (!jsonState) {
+        state.remove("JSON")
+    }
 }
 
-def getDeviceGid(){
-    host = "https://api.emporiaenergy.com/"
-    command = "customers/devices"
-    customer = httpGet([uri: "${host}${command}", headers:['authtoken':state.token]]){resp -> def respData = resp.data}
-    if(debugLog) log.debug JsonOutput.toJson(customer.devices)
-    deviceGID = []
-    deviceNames = []
-    customer.devices.each{ value ->
-        if(debugLog) log.debug value.deviceGid
-
-        deviceGID.add(value.deviceGid)
-
-        channels = value.devices.channels
-        channels.each{ next_value ->
-            deviceNames.add(next_value.name)
+def generateToken() {
+    def authEndpoint = "https://cognito-idp.us-east-2.amazonaws.com/"
+    def headers = [
+        "Content-Type": "application/x-amz-json-1.1",
+        "X-Amz-Target": "AWSCognitoIdentityProviderService.InitiateAuth"
+    ]
+    def body = JsonOutput.toJson([
+        AuthFlow: "USER_PASSWORD_AUTH",
+        ClientId: "4qte47jbstod8apnfic0bunmrq",
+        AuthParameters: [
+            USERNAME: settings.email,
+            PASSWORD: settings.password
+        ]
+    ])
+    def params = [uri: authEndpoint, headers: headers, body: body]
+    try {
+        httpPost(params) { resp ->
+            if (resp.status == 200) {
+                def responseText = resp.getData().getText('UTF-8')
+                def responseData = new JsonSlurper().parseText(responseText)
+                if (responseData.AuthenticationResult) {
+                    state.idToken = responseData.AuthenticationResult.IdToken
+                    state.accessToken = responseData.AuthenticationResult.AccessToken
+                    state.refreshToken = responseData.AuthenticationResult.RefreshToken
+                    state.tokenExpiry = now() + (responseData.AuthenticationResult.ExpiresIn * 1000)
+                    sendEvent(name: "tokenExpiry", value: new Date(state.tokenExpiry).format("yyyy-MM-dd'T'HH:mm:ss'Z'"))
+                    if (logEnable) log.info "Token generated successfully. ID Token: ${state.idToken}"
+                    updated() // Trigger updated to schedule refresh
+                } else {
+                    log.error "AuthenticationResult missing in response. Response: ${responseData}"
+                }
+            } else {
+                log.error "Failed to generate token. HTTP status: ${resp.status}"
+                if (debugLog) log.debug "Response data: ${resp.getData().getText('UTF-8')}"
+            }
         }
+    } catch (e) {
+        log.error "Error generating token: ${e.message}"
     }
-    state.deviceGID = deviceGID
-    deviceNames = deviceNames - null
-    deviceNames = deviceNames - ''
-    state.deviceNames = deviceNames
+}
+
+def refreshToken() {
+    def authEndpoint = "https://cognito-idp.us-east-2.amazonaws.com/"
+    def headers = [
+        "Content-Type": "application/x-amz-json-1.1",
+        "X-Amz-Target": "AWSCognitoIdentityProviderService.InitiateAuth"
+    ]
+    def body = JsonOutput.toJson([
+        AuthFlow: "REFRESH_TOKEN_AUTH",
+        ClientId: "4qte47jbstod8apnfic0bunmrq",
+        AuthParameters: [
+            REFRESH_TOKEN: state.refreshToken
+        ]
+    ])
+    def params = [uri: authEndpoint, headers: headers, body: body]
+    try {
+        httpPost(params) { resp ->
+            if (resp.status == 200) {
+                def responseText = resp.getData().getText('UTF-8')
+                def responseData = new JsonSlurper().parseText(responseText)
+                if (responseData.AuthenticationResult) {
+                    state.idToken = responseData.AuthenticationResult.IdToken
+                    state.accessToken = responseData.AuthenticationResult.AccessToken
+                    state.tokenExpiry = now() + (responseData.AuthenticationResult.ExpiresIn * 1000)
+                    sendEvent(name: "tokenExpiry", value: new Date(state.tokenExpiry).format("yyyy-MM-dd'T'HH:mm:ss'Z'"))
+                    log.info "Token refreshed successfully. New ID Token: ${state.idToken}"
+                    updated() // Trigger updated to reschedule refresh
+                } else {
+                    log.error "AuthenticationResult missing in refresh response. Response: ${responseData}"
+                }
+            } else {
+                log.error "Failed to refresh token. HTTP status: ${resp.status}"
+                if (debugLog) log.debug "Response data: ${resp.getData().getText('UTF-8')}"
+            }
+        }
+    } catch (e) {
+        log.error "Error refreshing token: ${e.message}"
+    }
+}
+
+
+def getDeviceGid() {
+    def host = "https://api.emporiaenergy.com/"
+    def command = "customers/devices"
+    try {
+        def response = httpGet([uri: "${host}${command}", headers: ['authtoken': state.idToken]]) { resp -> resp.data }
+        if (debugLog) log.debug JsonOutput.toJson(response.devices)
+        def deviceGID = []
+        def deviceNames = []
+        response.devices.each { value ->
+            if (debugLog) log.debug value.deviceGid
+            deviceGID.add(value.deviceGid)
+            value.devices.channels.each { next_value ->
+                deviceNames.add(next_value.name)
+            }
+        }
+        state.deviceGID = deviceGID
+        state.deviceNames = deviceNames - null - ''
+    } catch (e) {
+        log.error "Error fetching device GID: ${e.message}"
+    }
 }
 
 def refresh() {
@@ -153,9 +255,10 @@ def refresh() {
         state.lastUpdate = formattedDate
         sendEvent(name: "lastUpdate", value: formattedDate)
     } else {
-        log.info "device Gid not found. Please refresh Authtoken and getDeviceGid"
+        log.info "Device GID not found. Please refresh Authtoken and getDeviceGid"
     }
 }
+
 
 def attemptRefresh(params) {
     def host = params.host
@@ -166,7 +269,8 @@ def attemptRefresh(params) {
 
     def command = "AppAPI?apiMethod=getDeviceListUsages&deviceGids=${Gid_string}&instant=${instant}&scale=${scale}&energyUnit=${energyUnit}"
     if (debugLog) log.debug "${host}${command}"
-    def JSON = httpGet([uri: "${host}${command}", headers: ['authtoken': state.token]]) { resp -> resp.data }
+    
+    def JSON = httpGet([uri: "${host}${command}", headers: ['authtoken': state.idToken]]) { resp -> resp.data }
     if (jsonState) {
         state.JSON = JsonOutput.toJson(JSON)
     }
@@ -174,19 +278,20 @@ def attemptRefresh(params) {
     def combinedTotals = 0
     def needsRetry = false
 
-  //The EmporiaVue API sometimes returns a null value due to server being busy. The following code attempts another refresh for x tries after waiting x seconds
+    // The EmporiaVue API sometimes returns a null value due to the server being busy.
+    // The following code attempts another refresh for up to 5 tries after waiting 10 seconds.
     devices.each { value ->
         value.channelUsages.each { next_value ->
             def usage = next_value.usage
-            if(debugLog) log.debug next_value
+            if (debugLog) log.debug next_value
             if (usage == null) {
-                if(debugLog) log.debug "null value encountered on ${next_value.name} will attempting another refresh"
+                if (debugLog) log.debug "Null value encountered on ${next_value.name}, attempting another refresh"
                 needsRetry = true
-                if (attempts < 3) {
+                if (attempts < 6) {
                     runIn(10, attemptRefresh, [overwrite: false, data: [host: host, Gid_string: Gid_string, instant: instant, energyUnit: energyUnit, attempts: attempts + 1]])
                     return
                 } else {
-                    log.error "null value encountered on ${next_value.name} after 3 attempts"
+                    log.error "Null value encountered on ${next_value.name} after 5 attempts. Check EmporiaVue Mobile App to see if device is online"
                     return
                 }
             }
@@ -199,11 +304,18 @@ def attemptRefresh(params) {
     }
 }
 
+    
+// Placeholder method for rounding to two decimal places
+def roundToTwoDecimalPlaces(value) {
+    return Math.round(value * 100) / 100
+}
+
+
+
 def authToken(token) {
-    state.token = token
-    def now = new Date()
-    def dateFormat = new SimpleDateFormat("MM-dd-yyyy h:mm:ss a")
-    state.lastTokenUpdate = dateFormat.format(now)
+    state.idToken = token
+    now = new Date().format("yyyy-MM-dd'T'HH:mm:ss'Z'")
+    state.lastTokenUpdate = timeToday(now)
 }
 
 def convertToWh(usage) {
@@ -219,6 +331,3 @@ def convertToWh(usage) {
     }
 }
 
-def roundToTwoDecimalPlaces(value) {
-    return Math.round(value * 100) / 100
-}
