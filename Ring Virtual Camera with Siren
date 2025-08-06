@@ -1,0 +1,89 @@
+/**
+ *  Ring Virtual Camera with Siren Device Driver
+ *
+ *  Copyright 2019-2020 Ben Rimmasch
+ *  Copyright 2021 Caleb Morse
+ *
+ *  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
+ *  in compliance with the License. You may obtain a copy of the License at:
+ *
+ *      http://www.apache.org/licenses/LICENSE-2.0
+ *
+ *  Unless required by applicable law or agreed to in writing, software distributed under the License is distributed
+ *  on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License
+ *  for the specific language governing permissions and limitations under the License.
+ */
+
+metadata {
+    definition(name: "Ring Virtual Camera with Siren", namespace: "ring", author: "Chris & Copilot") {
+        capability "Actuator"
+        capability "Sensor"
+        capability "Refresh"
+        capability "Switch"         // Used to trigger siren on/off
+        capability "Health Check"
+
+        attribute "deviceStatus", "string"
+        attribute "lastUpdated", "string"
+    }
+
+    preferences {
+        input name: "logEnable", type: "bool", title: "Enable debug logging", defaultValue: true
+        input name: "txtEnable", type: "bool", title: "Enable descriptionText logging", defaultValue: true
+    }
+}
+
+def installed() {
+    logInfo("Installed")
+    initialize()
+}
+
+def updated() {
+    logInfo("Updated")
+    initialize()
+}
+
+def initialize() {
+    logInfo("Initializing")
+    if (logEnable) runIn(1800, logsOff)
+}
+
+def refresh() {
+    logInfo("Refresh called")
+    parent.refreshDevice(device.deviceNetworkId)
+}
+
+def parse(String description) {
+    logDebug("Parsing: $description")
+    // Typically unused for virtual devices
+}
+
+def setDeviceStatus(status) {
+    sendEvent(name: "deviceStatus", value: status, descriptionText: "Camera status is $status")
+    sendEvent(name: "lastUpdated", value: new Date().format("yyyy-MM-dd HH:mm:ss", location.timeZone))
+    logInfo("Device status set to $status")
+}
+
+def on() {
+    logInfo("Siren ON requested")
+    parent.sirenOn(device.deviceNetworkId)
+    sendEvent(name: "switch", value: "on", descriptionText: "Siren turned on")
+}
+
+def off() {
+    logInfo("Siren OFF requested")
+    parent.sirenOff(device.deviceNetworkId)
+    sendEvent(name: "switch", value: "off", descriptionText: "Siren turned off")
+}
+
+def logInfo(msg) {
+    if (txtEnable) log.info "${device.displayName}: $msg"
+}
+
+def logDebug(msg) {
+    if (logEnable) log.debug "${device.displayName}: $msg"
+}
+
+def logsOff() {
+    log.warn "${device.displayName}: Debug logging disabled"
+    device.updateSetting("logEnable", [value: "false", type: "bool"])
+}
