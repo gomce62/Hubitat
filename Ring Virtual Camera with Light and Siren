@@ -15,7 +15,7 @@ metadata {
       name:"Ring Virtual Camera with Light and Siren",
       namespace: "gomce62",
       author: "Chris Feduniw",
-      importUrl:"https://raw.githubusercontent.com/gomce62/Hubitat/refs/heads/Drivers/Ring Virtual Camera with Light and Siren",
+      importUrl:"https://raw.githubusercontent.com/gomce62/Hubitat/refs/heads/Drivers/Ring%20Virtual%20Camera%20with%20Light%20and%20Siren",
     ){
     capability "Actuator"
     capability "Alarm"
