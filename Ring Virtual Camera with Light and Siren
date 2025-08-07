@@ -1,0 +1,245 @@
+/**
+ *  Ring Virtual Camera with Light & Siren Device Driver
+ *
+ *  The driver was created by merging the Ring Virtual Light driver and Ring Virtual Camera with Siren driver created by Ben Rimmasch / Caleb Morse
+ *  into one driver to support all the functions and features of the Ring Spotlight Cam (1st Gen) - Turn Light on/off, Siren on/off, show both batteries, etc 
+ *  Note: When the API retrieves the device RING reports the Spotlight Cam as a "stickup_cam_v4" so if you want the App to automatically associate this driver to the device
+ *  you will need to update the App code @Field final static Map section to this:
+ *  "stickup_cam_v4": [name: "Ring Floodlight Cam Battery/Solar", driver: "Ring Virtual Camera with Light and Siren"]
+ *
+ *  Licensed under the Apache License, Version 2.0
+ */
+
+metadata {
+   definition(
+      name:"Ring Virtual Camera with Light and Siren",
+      namespace: "gomce62",
+      author: "Chris Feduniw",
+      importUrl:"https://raw.githubusercontent.com/gomce62/Hubitat/refs/heads/Drivers/Ring Virtual Camera with Light and Siren",
+    ){
+    capability "Actuator"
+    capability "Alarm"
+    capability "Battery"
+    capability "MotionSensor"
+    capability "Polling"
+    capability "Refresh"
+    capability "Sensor"
+    capability "Switch"
+
+    attribute "lastDing", "string"
+    attribute "firmware", "string"
+    attribute "battery2", "number"
+    attribute "rssi", "number"
+    attribute "wifi", "string"
+
+    command "getDings"
+    command "sirenOn"
+    command "sirenOff"
+  }
+
+preferences {
+  input name: "discardBatteryLevel", type: "bool", title: "<b>Discard the battery level because this device is plugged in or doesn't support " +
+      "battery level</b>", description: "This setting can prevent a battery level attribute from showing up but it cannot remove one once battery " +
+      "has been set.  Nothing can.", defaultValue: true
+  input name: "lightPolling", type: "bool", title: "Enable polling for light status", defaultValue: false
+  input name: "lightInterval", type: "number", range: 10..600, title: "Seconds between light polls", defaultValue: 15
+  input name: "snapshotPolling", type: "bool", title: "Enable polling for snapshot thumbnails", defaultValue: false
+  input name: "descriptionTextEnable", type: "bool", title: "Enable descriptionText logging", defaultValue: false
+  input name: "logEnable", type: "bool", title: "Enable debug logging", defaultValue: false
+  input name: "traceLogEnable", type: "bool", title: "Enable trace logging", defaultValue: false
+}
+
+    
+}
+
+void logInfo(msg) {
+  if (descriptionTextEnable) { log.info msg }
+}
+
+void logDebug(msg) {
+  if (logEnable) { log.debug msg }
+}
+
+void logTrace(msg) {
+  if (traceLogEnable) { log.trace msg }
+}
+
+def parse(String description) {
+  logDebug "description: ${description}"
+}
+
+def poll() {
+  refresh()
+}
+
+def refresh() {
+  logDebug "refresh()"
+  parent.apiRequestDeviceRefresh(device.deviceNetworkId)
+  parent.apiRequestDeviceHealth(device.deviceNetworkId, "doorbots")
+}
+
+def getDings() {
+  logDebug "getDings()"
+  def dings = parent.apiRequestDings()
+  if (dings) {
+    def dingSummary = dings.collect { "${it.kind} at ${it.created_at}" }.join(", ")
+    sendEvent(name: "lastDing", value: dingSummary ?: "No recent dings")
+  } else {
+    sendEvent(name: "lastDing", value: "No recent dings")
+  }
+}
+
+def updated() {
+  setupPolling()
+  parent.snapshotOption(device.deviceNetworkId, snapshotPolling)
+}
+
+// LIGHT CONTROL
+def on() {
+  state.strobing = false
+  parent.apiRequestDeviceSet(device.deviceNetworkId, "doorbots", "floodlight_light_on")
+}
+
+def off() {
+  if (state.strobing) unschedule()
+  state.strobing = false
+  parent.apiRequestDeviceSet(device.deviceNetworkId, "doorbots", "floodlight_light_off")
+  parent.apiRequestDeviceSet(device.deviceNetworkId, "doorbots", "siren_off")  // also turns off siren if active
+}
+
+// SIREN CONTROL
+def sirenOn() {
+  parent.apiRequestDeviceSet(device.deviceNetworkId, "doorbots", "siren_on")
+  sendEvent(name: "sirenStatus", value: "on")
+}
+
+def sirenOff() {
+  parent.apiRequestDeviceSet(device.deviceNetworkId, "doorbots", "siren_off")
+  sendEvent(name: "sirenStatus", value: "off")
+}
+
+def push(buttonNumber) {
+  switch (buttonNumber) {
+    case 1: sirenOn(); break
+    case 2: sirenOff(); break
+    default: logWarn "Unhandled button number: $buttonNumber"
+  }
+}
+
+
+
+def setupPolling() {
+  unschedule()
+  if (lightPolling) {
+    pollLight()
+  }
+}
+
+def pollLight() {
+  logTrace "pollLight()"
+  refresh()
+  if (lightPolling) {
+    runIn(lightInterval, pollLight)
+  }
+}
+
+// HANDLERS
+void handleDeviceSet(final String action, final Map msg, final Map query) {
+  if (action == "floodlight_light_on") {
+    checkChanged("switch", "on")
+  }
+  else if (action == "floodlight_light_off") {
+    checkChanged("switch", "off")
+  }
+  else if (action == "siren_on") {
+    checkChanged("alarm", "siren")
+    if (msg.seconds_remaining) runIn(msg.seconds_remaining + 1, refresh)
+  }
+  else if (action == "siren_off") {
+    checkChanged("alarm", "off")
+  }
+  else {
+    log.error "handleDeviceSet unsupported action ${action}, msg=${msg}, query=${query}"
+  }
+}
+
+void handleHealth(final Map msg) {
+  if (msg.device_health?.wifi_name) {
+    checkChanged("wifi", msg.device_health.wifi_name)
+  }
+}
+
+void handleMotion(final Map msg) {
+  if (msg.motion == true) {
+    checkChanged("motion", "active")
+    runIn(60, motionOff)
+  }
+  else if (msg.motion == false) {
+    checkChanged("motion", "inactive")
+    unschedule(motionOff)
+  }
+  else {
+    log.error("handleMotion unsupported msg: ${msg}")
+  }
+}
+
+void handleRefresh(final Map msg) {
+  if (!discardBatteryLevel) {
+    if (msg.battery_life != null) {
+      checkChanged("battery", msg.battery_life, "%")
+      if (msg.battery_life_2 != null) {
+        checkChanged("battery2", msg.battery_life_2, "%")
+      }
+    }
+    else if (msg.battery_life_2 != null) {
+      checkChanged("battery", msg.battery_life_2, "%")
+    }
+  }
+
+  if (msg.led_status) {
+    if (!(msg.led_status instanceof String) && msg.led_status.seconds_remaining != null) {
+      checkChanged("switch", msg.led_status.seconds_remaining > 0 ? "on" : "off")
+    } else {
+      checkChanged("switch", msg.led_status)
+    }
+  }
+
+  if (msg.siren_status?.seconds_remaining != null) {
+    final Integer secondsRemaining = msg.siren_status.seconds_remaining
+    checkChanged("alarm", secondsRemaining > 0 ? "siren" : "off")
+    if (secondsRemaining > 0) {
+      runIn(secondsRemaining + 1, refresh)
+    }
+  }
+
+  if (msg.health) {
+    final Map health = msg.health
+
+    if (health.firmware_version) {
+      checkChanged("firmware", health.firmware_version)
+    }
+
+    if (health.rssi) {
+      checkChanged("rssi", health.rssi)
+    }
+  }
+}
+
+void motionOff() {
+  checkChanged("motion", "inactive")
+}
+
+void runCleanup() {
+  state.remove('lastActivity')
+  device.removeDataValue("firmware")
+  device.removeDataValue("device_id")
+}
+
+boolean checkChanged(final String attribute, final newStatus, final String unit=null, final String type=null) {
+  final boolean changed = device.currentValue(attribute) != newStatus
+  if (changed) {
+    logInfo "${attribute.capitalize()} for device ${device.label} is ${newStatus}"
+  }
+  sendEvent(name: attribute, value: newStatus, unit: unit, type: type)
+  return changed
+}
