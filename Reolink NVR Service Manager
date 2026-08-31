@@ -18,7 +18,7 @@ definition(
     name: "Reolink NVR (Service Manager)",
     namespace: "gomce62",
     author: "Chris Feduniw + Grok and Gemini AI",
-    importUrl:"https://raw.githubusercontent.com/gomce62/Hubitat/",
+    importUrl:"https://raw.githubusercontent.com/gomce62/Hubitat/refs/heads/apps/Reolink%20NVR%20Service%20Manager",
     description: "Discovers channels on a Reolink NVR, creates/manages child devices, and centrally handles login/polling/HTTP for all of them.",
     category: "Video",
     menu: "Integrations",
