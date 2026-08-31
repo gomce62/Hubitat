@@ -1,0 +1,131 @@
+/**
+ * Reolink IP Camera (RLN8-410) — Component Driver
+ * Author: Chris Feduniw + Grok and Gemini AI
+ * Namespace: gomce62
+ *
+ * Thin component driver managed by the Reolink NVR Service Manager app.
+ * 
+ *    Date        Who            What
+ *    ----        ---            ----
+ *   8/31/26    gomce62       Initial release
+*/
+
+metadata {
+    definition(
+        name:      "Reolink IP Camera (RLN8-410)",
+        namespace: "gomce62",
+        author:    "Chris Feduniw + Grok and Gemini AI",
+        importUrl:"https://raw.githubusercontent.com/gomce62/Hubitat/",
+        description: "Reolink camera component driver. Requires Reolink NVR Service Manager as parent."
+    ) {
+        capability "MotionSensor"
+        capability "Switch"
+        capability "Refresh"
+        
+        command "irEnable"
+        command "irDisable"
+        command "pollMotion"
+        command "pushNotificationsOn"
+        command "pushNotificationsOff"
+
+       
+        attribute "irLed",             "string"
+        attribute "spotlight",         "string"
+        attribute "lastMotionTime",    "string"
+        attribute "lastMotionType",    "string"
+        attribute "cameraOnline",      "string"
+        attribute "cameraName",        "string"
+        attribute "cameraChannel",     "string"
+        attribute "pushNotifications", "string"
+    }
+
+    preferences {
+        input name: "motionResetTime", type: "number", title: "Motion Reset Delay (seconds)",
+            defaultValue: 30, range: "5..300"
+        input name: "logEnable", type: "bool", title: "Enable Debug Logging", defaultValue: false
+        input name: "txtLogEnable", type: "bool", title: "Enable Descriptive Text Logging", defaultValue: true
+    }
+}
+
+// Lifecycle
+def installed() {
+    log.info "${device.displayName}: Installed."
+    initialize()
+}
+
+def updated() {
+    log.info "${device.displayName}: Preferences updated."
+    unschedule()
+    if (logEnable) runIn(1800, "logsOff")
+    initialize()
+}
+
+def logsOff() {
+    log.warn "${device.displayName}: Debug logging disabled automatically."
+    device.updateSetting("logEnable", [value: "false", type: "bool"])
+}
+
+def initialize() {
+    sendEvent(name: "motion", value: "inactive")
+    if (!device.currentValue("pushNotifications")) {
+        sendEvent(name: "pushNotifications", value: "unknown")
+    }
+}
+
+// Commands
+def refresh() {
+    logDebug "refresh() → parent.componentRefresh() + parent.componentPollMotion()"
+    parent?.componentRefresh(device)
+    parent?.componentPollMotion(device)
+}
+
+def on()  { logDebug "on() → parent.componentOn()";  parent?.componentOn(device) }
+def off() { logDebug "off() → parent.componentOff()"; parent?.componentOff(device) }
+
+def irEnable()  { logDebug "irEnable() → parent.componentIrEnable()";  parent?.componentIrEnable(device) }
+def irDisable() { logDebug "irDisable() → parent.componentIrDisable()"; parent?.componentIrDisable(device) }
+
+def pollMotion() { logDebug "pollMotion() → parent.componentPollMotion()"; parent?.componentPollMotion(device) }
+
+def pushNotificationsOn()  { logDebug "pushNotificationsOn() → parent.componentPushOn()";  parent?.componentPushOn(device) }
+def pushNotificationsOff() { logDebug "pushNotificationsOff() → parent.componentPushOff()"; parent?.componentPushOff(device) }
+
+// Called by parent app
+void parseMotionState(Map data) {
+    if (!data?.active) return
+
+    boolean wasActive = (device.currentValue("motion") == "active")
+    String currentType = device.currentValue("lastMotionType")
+
+    sendEvent(name: "lastMotionTime", value: timestampNow())
+
+    if (!wasActive) {
+        sendEvent(name: "lastMotionType", value: data.type)
+    } else if (data.aiPerson == true && currentType != "person") {
+        sendEvent(name: "lastMotionType", value: "person")
+    }
+
+    if (!wasActive) {
+        sendEvent(name: "motion", value: "active")
+    }
+
+    unschedule("resetMotion")
+    runIn((motionResetTime ?: 30).toInteger(), "resetMotion")
+}
+
+def resetMotion() {
+    sendEvent(name: "motion", value: "inactive")
+}
+
+// Logging
+private String timestampNow() {
+    try {
+        return new Date().format("MMM dd, yyyy h:mm:ss a", location.timeZone)
+    } catch (e) {
+        return new Date().format("MMM dd, yyyy h:mm:ss a")
+    }
+}
+
+private void logDebug(msg) {
+    if (logEnable) log.debug "${device.displayName}: ${msg}"
+}
