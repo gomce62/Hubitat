@@ -29,7 +29,7 @@ metadata {
         name:      "Reolink Doorbell (Auto-Detect NVR Channel)",
         namespace: "gomce62",
         author:    "Chris Feduniw + Grok and Gemini AIt",
-        importUrl:"",
+        importUrl:"https://raw.githubusercontent.com/gomce62/Hubitat/refs/heads/Drivers/Reolink%20Doorbell%20Auto-Detect%20NVR%20Channel%20driver",
         description: "Reolink doorbell component driver. Requires the Reolink NVR (Service Manager) app as its parent."
     ) {
         capability "MotionSensor"
