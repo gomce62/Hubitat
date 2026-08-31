@@ -15,7 +15,7 @@ metadata {
         name:      "Reolink IP Camera (RLN8-410)",
         namespace: "gomce62",
         author:    "Chris Feduniw + Grok and Gemini AI",
-        importUrl:"https://raw.githubusercontent.com/gomce62/Hubitat/",
+        importUrl:"https://raw.githubusercontent.com/gomce62/Hubitat/refs/heads/Drivers/Reolink%20IP%20Camera%20RLN8-410%20driver",
         description: "Reolink camera component driver. Requires Reolink NVR Service Manager as parent."
     ) {
         capability "MotionSensor"
