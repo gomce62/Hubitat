@@ -1,0 +1,745 @@
+/**
+ * Reolink NVR (Service Manager)
+ * Author: Chris Feduniw + Grok and Gemini AI
+ * Namespace: gomce62
+ *
+ * Centralized design: this app is the ONLY thing that holds NVR credentials,
+ * the ONLY thing that logs in / manages the auth token, and the ONLY thing
+ * that talks HTTP to the NVR.
+ * 
+ *    Date        Who            What
+ *    ----        ---            ----
+ *   8/31/26    gomce62       Initial release
+*/
+import groovy.json.JsonSlurper
+import groovy.json.JsonOutput
+
+definition(
+    name: "Reolink NVR (Service Manager)",
+    namespace: "gomce62",
+    author: "Chris Feduniw + Grok and Gemini AI",
+    importUrl:"https://raw.githubusercontent.com/gomce62/Hubitat/",
+    description: "Discovers channels on a Reolink NVR, creates/manages child devices, and centrally handles login/polling/HTTP for all of them.",
+    category: "Video",
+    menu: "Integrations",
+    iconUrl: "",
+    iconX2Url: "",
+    iconX3Url: "",
+    singleInstance: false
+)
+
+preferences {
+    page(name: "mainPage")
+    page(name: "discoveryPage")
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// Pages
+// ═════════════════════════════════════════════════════════════════════════
+def mainPage() {
+    dynamicPage(name: "mainPage", title: "Reolink NVR", install: true, uninstall: true) {
+        section("NVR Connection") {
+            label title: "App Name", required: false
+            input name: "ipAddress", type: "text", title: "NVR IP Address", required: true
+            input name: "camUsername", type: "text", title: "Username", defaultValue: "admin", required: true
+            input name: "camPassword", type: "password", title: "Password", required: true
+        }
+        section("Channels") {
+            href name: "toDiscoveryPage", page: "discoveryPage",
+                 title: "Discover / Manage Channels",
+                 description: state.discoveredChannels ?
+                     "${state.discoveredChannels.size()} channel(s) found (last scan: ${state.lastDiscovery ?: 'never'})" :
+                     "No channels discovered yet — tap to scan"
+        }
+        if (getChildDevices()) {
+            section("Installed Devices") {
+                getChildDevices().sort { it.displayName }.each { c ->
+                    paragraph "• ${c.displayName} — ${c.typeName}"
+                }
+            }
+        }
+        section("Polling") {
+            input name: "pollInterval", type: "enum", title: "Motion Poll Interval (applies to all channels)",
+                options: ["2":"2 seconds","5":"5 seconds","10":"10 seconds","15":"15 seconds","30":"30 seconds","60":"1 minute"],
+                defaultValue: "10"
+        }
+        section("Shared Device Settings", hideable: true, hidden: true) {
+            input name: "motionResetTime", type: "number", title: "Motion Reset Delay (seconds)",
+                defaultValue: 30, range: "5..300"
+            input name: "logEnable", type: "bool", title: "Enable Debug Logging (app + all devices)", defaultValue: false
+            input name: "txtLogEnable", type: "bool", title: "Enable Descriptive Text Logging (all devices)", defaultValue: true
+        }
+        section("Maintenance", hideable: true, hidden: true) {
+            input name: "autoManage", type: "bool",
+                title: "Automatically rediscover & sync channels every 3 hours", defaultValue: true
+            input name: "removeUnselected", type: "bool",
+                title: "Remove child devices for channels that go offline or are unchecked", defaultValue: false
+            input name: "refreshAllBtn", type: "button", title: "Refresh All Devices Now"
+            input name: "cleanupBtn", type: "button", title: "Remove Offline Channel Devices"
+        }
+    }
+}
+
+def discoveryPage() {
+    dynamicPage(name: "discoveryPage", title: "Discover Reolink Channels", nextPage: "mainPage") {
+        section {
+            paragraph "Scans the NVR at the IP address entered on the previous page and lists every channel it reports. Check the ones you want as Hubitat devices."
+            input name: "scanBtn", type: "button", title: "Scan NVR Now"
+        }
+        if (state.discoveredChannels) {
+            section("Found Channels (as of ${state.lastDiscovery})") {
+                state.discoveredChannels.each { ch ->
+                    String statusTxt = ch.online ? "Online" : "Offline"
+                    String suggested = ch.isDoorbell ? "Doorbell" : "Camera"
+                    paragraph "<b>${ch.name}</b> — Channel ${ch.humanChannel} — ${statusTxt} — suggested type: ${suggested}"
+                    input name: "select_${ch.channel}", type: "bool",
+                        title: "Add / keep this device", defaultValue: true
+                    input name: "type_${ch.channel}", type: "enum",
+                        title: "Device Type",
+                        options: ["auto":"Auto-detect", "camera":"IP Camera", "doorbell":"Doorbell"],
+                        defaultValue: "auto"
+                }
+            }
+        } else {
+            section { paragraph "No scan results yet. Tap 'Scan NVR Now' above." }
+        }
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// Button handling
+// ═════════════════════════════════════════════════════════════════════════
+def appButtonHandler(String btn) {
+    switch (btn) {
+        case "scanBtn":
+            discoverChannelsFromNVR()
+            break
+        case "refreshAllBtn":
+            refreshAllChannels()
+            break
+        case "cleanupBtn":
+            cleanupOfflineChannels()
+            break
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// Lifecycle
+// ═════════════════════════════════════════════════════════════════════════
+def installed() {
+    initialize()
+}
+
+def updated() {
+    unschedule()
+    if (logEnable) runIn(1800, "logsOff")
+    if (state.discoveredChannels) {
+        syncChildDevices()
+    }
+    initialize()
+}
+
+def uninstalled() {
+    getChildDevices().each { deleteChildDevice(it.deviceNetworkId) }
+}
+
+def initialize() {
+    if (autoManage != false) {
+        runEvery3Hours("periodicMaintenance")
+    }
+    runEvery10Minutes("refreshAllChannels")
+    schedulePolling()
+}
+
+def logsOff() {
+    app.updateSetting("logEnable", [value: "false", type: "bool"])
+}
+
+def periodicMaintenance() {
+    discoverChannelsFromNVR()
+    syncChildDevices()
+}
+
+private void schedulePolling() {
+    int secs = (pollInterval ?: "10").toInteger()
+    runIn(secs, "pollAllChannels")
+}
+
+def pollAllChannels() {
+    try {
+        if (ipAddress && camUsername && camPassword) {
+            ensureToken()
+            getChildDevices().each { cd ->
+                try {
+                    componentPollMotion(cd)
+                } catch (e) {
+                    log.warn "Reolink NVR App: poll failed for ${cd.displayName} — ${e}"
+                }
+            }
+        }
+    } catch (Exception topE) {
+        log.error "Reolink NVR App: Critical failure inside pollAllChannels execution — ${topE}"
+    } finally {
+        schedulePolling()
+    }
+}
+
+def refreshAllChannels() {
+    if (!ipAddress || !camUsername || !camPassword) return
+    try {
+        ensureToken()
+        def channelList = fetchChannelStatusList()
+        getChildDevices().each { cd ->
+            try {
+                Integer ch = channelOf(cd)
+                if (ch == null) return
+                cd.sendEvent(name: "cameraOnline", value: (state.online == true).toString())
+                def entry = channelList?.find { it.channel?.toInteger() == ch }
+                if (entry) applyChannelInfo(cd, ch, entry)
+                refreshIrLed(cd, ch)
+                refreshWhiteLed(cd, ch)
+                refreshPushState(cd, ch)
+            } catch (e) {
+                log.warn "Reolink NVR App: refresh failed for ${cd.displayName} — ${e}"
+            }
+        }
+    } catch (Exception topE) {
+        log.error "Reolink NVR App: Global refresh error occurred — ${topE}"
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// Discovery
+// ═════════════════════════════════════════════════════════════════════════
+private void discoverChannelsFromNVR() {
+    if (!ipAddress) {
+        log.warn "Reolink NVR App: IP address not set, cannot scan."
+        return
+    }
+    def list = fetchChannelStatusList()
+    if (list == null) return
+    def found = []
+    list.each { entry ->
+        Integer ch = entry.channel?.toInteger()
+        Integer humanChannel = ch + 1
+        String name = entry.name ?: "Channel ${humanChannel}"
+        Integer online = (entry.online ?: 0) as Integer
+        found << [
+            channel: ch,
+            humanChannel: humanChannel,
+            name: name,
+            online: (online == 1),
+            isDoorbell: isDoorbellName(name)
+        ]
+    }
+    state.discoveredChannels = found
+    state.lastDiscovery = timestampNow()
+    log.info "Reolink NVR App: discovery found ${found.size()} channel(s)."
+}
+
+private List fetchChannelStatusList() {
+    def response = doAuthedPost("GetChannelStatus", null, [:])
+    if (!response) {
+        log.warn "Reolink NVR App: no response from NVR for GetChannelStatus."
+        return []
+    }
+    try {
+        def json = parseJson(response)[0]
+        if (json?.code != 0) {
+            log.warn "Reolink NVR App: NVR returned error for GetChannelStatus — ${json?.error ?: json}"
+            return []
+        }
+        return json.value?.status ?: []
+    } catch (e) {
+        log.warn "Reolink NVR App: GetChannelStatus parse error — ${e}"
+        return []
+    }
+}
+
+private void applyChannelInfo(cd, Integer ch, entry) {
+    String friendly = entry.name ?: "Channel ${ch + 1}"
+    cd.sendEvent(name: "cameraName", value: friendly)
+    cd.sendEvent(name: "cameraChannel", value: (ch + 1).toString())
+    String newLabel = "${friendly} (Channel ${ch + 1})"
+    if (cd.label != newLabel) cd.setLabel(newLabel)
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// Child device sync
+// ═════════════════════════════════════════════════════════════════════════
+private void syncChildDevices() {
+    if (!state.discoveredChannels) return
+    def keepDnis = []
+    state.discoveredChannels.each { ch ->
+        boolean selected = (settings["select_${ch.channel}"] != false)
+        if (!selected) return
+        if (!ch.online) return
+        String override = settings["type_${ch.channel}"] ?: "auto"
+        boolean isDoorbell = (override == "doorbell") || (override == "auto" && ch.isDoorbell)
+        String driverName = isDoorbell ?
+            "Reolink Doorbell (Auto-Detect NVR Channel)" :
+            "Reolink IP Camera (RLN8-410)"
+        String dni = "reolink-${app.id}-${ch.channel}"
+        keepDnis << dni
+        def child = getChildDevice(dni)
+        if (!child) {
+            try {
+                child = addChildDevice(
+                    "gomce62",
+                    driverName,
+                    dni,
+                    [ label: "${ch.name} (Channel ${ch.humanChannel})", isComponent: false ]
+                )
+                log.info "Reolink NVR App: created child device '${child.displayName}' (${driverName})."
+            } catch (e) {
+                log.warn "Reolink NVR App: failed to create child for channel ${ch.humanChannel} — ${e}"
+                return
+            }
+        }
+        pushSettingsToChild(child, ch)
+    }
+    if (removeUnselected) {
+        getChildDevices().each { c ->
+            if (!keepDnis.contains(c.deviceNetworkId)) {
+                log.info "Reolink NVR App: removing unselected/offline child '${c.displayName}'."
+                deleteChildDevice(c.deviceNetworkId)
+            }
+        }
+    }
+}
+
+private void pushSettingsToChild(child, chInfo) {
+    child.updateDataValue("channel", chInfo.channel.toString())
+    child.updateSetting("motionResetTime", [value: (motionResetTime ?: 30), type: "number"])
+    child.updateSetting("logEnable", [value: (logEnable ?: false), type: "bool"])
+    child.updateSetting("txtLogEnable", [value: (txtLogEnable != false), type: "bool"])
+    try { child.updated() } catch (e) { log.warn "Reolink NVR App: updated() failed for ${child.displayName} — ${e}" }
+}
+
+private void cleanupOfflineChannels() {
+    if (!state.discoveredChannels) {
+        discoverChannelsFromNVR()
+    }
+    def onlineChannels = (state.discoveredChannels ?: []).findAll { it.online }.collect { it.channel }
+    getChildDevices().each { child ->
+        Integer ch = channelOf(child)
+        if (ch == null || !onlineChannels.contains(ch)) {
+            log.info "Reolink NVR App: removing offline child '${child.displayName}'."
+            deleteChildDevice(child.deviceNetworkId)
+        }
+    }
+}
+
+private Integer channelOf(cd) {
+    def v = cd.getDataValue("channel")
+    return (v != null) ? v.toInteger() : null
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// Component methods
+// ═════════════════════════════════════════════════════════════════════════
+void componentRefresh(cd) {
+    if (!ipAddress || !camUsername || !camPassword) return
+    try {
+        ensureToken()
+        Integer ch = channelOf(cd)
+        if (ch == null) {
+            log.warn "Reolink NVR App: ${cd.displayName} has no channel assigned"
+            return
+        }
+        cd.sendEvent(name: "cameraOnline", value: (state.online == true).toString())
+        def list = fetchChannelStatusList()
+        def entry = list?.find { it.channel?.toInteger() == ch }
+        if (entry) applyChannelInfo(cd, ch, entry)
+        refreshIrLed(cd, ch)
+        refreshWhiteLed(cd, ch)
+        refreshPushState(cd, ch)
+        componentPollMotion(cd)
+    } catch (Exception e) {
+        log.error "Reolink NVR App: componentRefresh critical error for ${cd.displayName} — ${e}"
+    }
+}
+
+void componentOn(cd) { setWhiteLed(cd, true) }
+void componentOff(cd) { setWhiteLed(cd, false) }
+void componentIrEnable(cd) { setIrLed(cd, "Auto") }
+void componentIrDisable(cd) { setIrLed(cd, "Off") }
+void componentPushOn(cd) { setPushState(cd, 1) }
+void componentPushOff(cd) { setPushState(cd, 0) }
+
+void componentPollMotion(cd) {
+    if (!ipAddress || !camUsername || !camPassword) return
+    Integer ch = channelOf(cd)
+    if (ch == null) return
+
+    boolean anyAi = false
+    boolean isPerson = false
+    boolean isVehicle = false
+    boolean isAnimal = false
+    List<String> activeTypes = []
+
+    // === AI Detection ===
+    def aiResponse = doAuthedPost("GetAiState", ch, [ channel: ch ])
+    logDebug "componentPollMotion: ${cd.displayName} (ch=${ch}) AI raw response: ${aiResponse}"
+
+    if (aiResponse) {
+        try {
+            def result = parseJson(aiResponse)[0]
+            if (result?.code == 0) {
+                def ai = result.value ?: [:]
+                logDebug "AI structure keys for ${cd.displayName}: ${ai.keySet()}"
+
+                // Comprehensive person/human detection
+                if (ai.people?.alarm_state == 1 || 
+                    ai.person?.alarm_state == 1 || 
+                    ai.human?.alarm_state == 1) {
+                    isPerson = true
+                    activeTypes << "person"
+                }
+                if (ai.vehicle?.alarm_state == 1) {
+                    isVehicle = true
+                    activeTypes << "vehicle"
+                }
+                if (ai.dog_cat?.alarm_state == 1 || ai.animal?.alarm_state == 1) {
+                    isAnimal = true
+                    activeTypes << "animal"
+                }
+                if (ai.face?.alarm_state == 1) activeTypes << "face"
+                if (ai.package?.alarm_state == 1) activeTypes << "package"
+
+                if (activeTypes.size() > 0) {
+                    anyAi = true
+                }
+            }
+        } catch (e) {
+            logDebug "componentPollMotion: AI parse error for ${cd.displayName} — ${e}"
+        }
+    }
+
+    // === Basic Motion Detection ===
+    boolean mdActive = false
+    def mdResponse = doAuthedPost("GetMdState", ch, [ channel: ch ])
+    logDebug "componentPollMotion: ${cd.displayName} (ch=${ch}) MD raw response: ${mdResponse}"
+   
+    if (mdResponse) {
+        try {
+            def result = parseJson(mdResponse)[0]
+            if (result?.code == 0) {
+                mdActive = (result.value.state == 1)
+            }
+        } catch (e) {
+            logDebug "componentPollMotion: MD parse error for ${cd.displayName} — ${e}"
+        }
+    }
+
+    // === Final Motion Event ===
+    if (anyAi || mdActive) {
+        String finalType = "motion"
+        
+        if (anyAi && activeTypes) {
+            def priority = ["person", "vehicle", "animal"]
+            finalType = priority.find { activeTypes.contains(it) } ?: activeTypes[0]
+        }
+
+        logDebug "${cd.displayName} (ch=${ch}) → Motion ACTIVE | type=${finalType} | AI types=${activeTypes} | isPerson=${isPerson}"
+
+        cd.parseMotionState([
+            active: true,
+            type: finalType,
+            aiPerson: isPerson,
+            aiVehicle: isVehicle,
+            aiAnimal: isAnimal
+        ])
+        
+        scheduleRapidPolls(cd)
+    }
+}
+
+// BUGFIX HISTORY:
+// (1) runIn() schedules jobs by handler method name. Calling runIn()
+//     repeatedly with the SAME handler name ("rapidPollWrapper") for every
+//     delay does NOT queue five separate timers — each call cancels/replaces
+//     the prior one unless overwrite:false is passed. We initially fixed this
+//     with overwrite:false so all five rapid polls (1s/3s/5s/7s/9s) could
+//     coexist.
+// (2) That fix exposed a second, more serious bug: componentPollMotion() is
+//     itself called BY each of those rapid-poll jobs, and if motion is still
+//     active when they run (which is normal — a person walking through a
+//     yard takes several seconds, not one), componentPollMotion() calls
+//     scheduleRapidPolls() AGAIN, scheduling 5 more jobs. Every one of those
+//     does the same thing. This is exponential job creation: 5 → 25 → 125...
+//     Within a few seconds this blows through Hubitat's per-app scheduled-job
+//     ceiling (~75), which then throws IllegalStateException on every further
+//     runIn() call, breaks componentPollMotion() mid-execution, and can
+//     prevent motion/lastMotionTime from updating cleanly.
+// FIX: gate scheduleRapidPolls() with a per-device cooldown (10s) so a new
+// burst can only be scheduled once every 10 seconds. Sustained motion still
+// gets rapid polling from the burst already in flight; it just can't spawn a
+// fresh burst every single poll.
+private void scheduleRapidPolls(cd) {
+    String dni = cd.deviceNetworkId
+    if (state.rapidBurstStarted == null) state.rapidBurstStarted = [:]
+    Long lastBurst = state.rapidBurstStarted[dni]
+    Long nowMs = now()
+    if (lastBurst != null && (nowMs - lastBurst) < 10000L) {
+        // A burst for this device is already in flight — don't spawn another.
+        return
+    }
+    state.rapidBurstStarted[dni] = nowMs
+    [1, 3, 5, 7, 9].each { delay ->
+        runIn(delay, "rapidPollWrapper", [data: [dni: dni], overwrite: false])
+    }
+}
+
+def rapidPollWrapper(data) {
+    def cd = getChildDevice(data.dni)
+    if (cd) componentPollMotion(cd)
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// IR / White LED / Push (unchanged)
+// ═════════════════════════════════════════════════════════════════════════
+private void refreshIrLed(cd, Integer ch) {
+    def response = doAuthedPost("GetIrLights", ch, [ channel: ch ])
+    if (!response) return
+    try {
+        def result = parseJson(response)[0]
+        if (result?.code == 0) {
+            def stateVal = result.value.IrLights.state ?: "Auto"
+            cd.sendEvent(name: "irLed", value: stateVal.toLowerCase())
+        }
+    } catch (e) {}
+}
+
+private void setIrLed(cd, String stateStr) {
+    Integer ch = channelOf(cd)
+    if (ch == null) return
+    def prev = cd.currentValue("irLed") ?: "auto"
+    cd.sendEvent(name: "irLed", value: stateStr.toLowerCase())
+    def response = doAuthedPost("SetIrLights", ch, [ IrLights: [ channel: ch, state: stateStr ] ])
+    if (!response) { cd.sendEvent(name: "irLed", value: prev); return }
+    try {
+        def result = parseJson(response)[0]
+        if (result?.code != 0) cd.sendEvent(name: "irLed", value: prev)
+    } catch (e) {
+        cd.sendEvent(name: "irLed", value: prev)
+    }
+}
+
+private void refreshWhiteLed(cd, Integer ch) {
+    def response = doAuthedPost("GetWhiteLed", ch, [ channel: ch ])
+    if (!response) return
+    try {
+        def result = parseJson(response)[0]
+        if (result?.code == 0) {
+            def wl = result.value.WhiteLed
+            def s = (wl.state == 1) ? "on" : "off"
+            cd.sendEvent(name: "spotlight", value: s)
+            cd.sendEvent(name: "switch", value: s)
+        }
+    } catch (e) {}
+}
+
+private void setWhiteLed(cd, boolean enable) {
+    Integer ch = channelOf(cd)
+    if (ch == null) return
+    def newState = enable ? "on" : "off"
+    def prev = cd.currentValue("spotlight") ?: "off"
+    cd.sendEvent(name: "spotlight", value: newState)
+    cd.sendEvent(name: "switch", value: newState)
+    def response = doAuthedPost("SetWhiteLed", ch, [ WhiteLed: [ channel: ch, state: enable ? 1 : 0, mode: 1, bright: 100 ] ])
+    if (!response) {
+        cd.sendEvent(name: "spotlight", value: prev)
+        cd.sendEvent(name: "switch", value: prev)
+        return
+    }
+    try {
+        def result = parseJson(response)[0]
+        if (result?.code != 0) {
+            cd.sendEvent(name: "spotlight", value: prev)
+            cd.sendEvent(name: "switch", value: prev)
+        }
+    } catch (e) {
+        cd.sendEvent(name: "spotlight", value: prev)
+        cd.sendEvent(name: "switch", value: prev)
+    }
+}
+
+private void refreshPushState(cd, Integer ch) {
+    def uri = buildUriGlobal("GetPushV20") + "&channel=${ch}"
+    try {
+        httpGet([uri: uri, timeout: 10, contentType: "text/plain"]) { response ->
+            if (response.status == 200) {
+                def slurper = new JsonSlurper()
+                def json = slurper.parseText(response.data.text)
+                if (json && json[0]?.value?.Push) {
+                    def isEnabled = json[0].value.Push.enable
+                    String currentState = (isEnabled == 1) ? "on" : "off"
+                    cd.sendEvent(name: "pushNotifications", value: currentState)
+                }
+            }
+        }
+    } catch (Exception e) {
+        log.error "Reolink NVR App: error fetching push state for ${cd.displayName} — ${e.message}"
+    }
+}
+
+private void setPushState(cd, int stateValue) {
+    Integer ch = channelOf(cd)
+    if (ch == null) return
+    def prev = cd.currentValue("pushNotifications") ?: "unknown"
+    String targetState = (stateValue == 1) ? "on" : "off"
+    cd.sendEvent(name: "pushNotifications", value: targetState)
+    def response = doAuthedPost("SetPushV20", null, [ Push: [ enable: stateValue, schedule: [ channel: ch ] ] ])
+    if (!response) { cd.sendEvent(name: "pushNotifications", value: prev); return }
+    try {
+        def result = parseJson(response)[0]
+        if (result?.code != 0) {
+            log.warn "Reolink NVR App: NVR rejected push update for ${cd.displayName} — ${result?.error ?: result}"
+            cd.sendEvent(name: "pushNotifications", value: prev)
+        } else {
+            log.info "Reolink NVR App: push notifications set to [${targetState.toUpperCase()}] for ${cd.displayName}"
+        }
+    } catch (e) {
+        cd.sendEvent(name: "pushNotifications", value: prev)
+    }
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// Doorbell name detection
+// ═════════════════════════════════════════════════════════════════════════
+private List<String> doorbellPatterns() {
+    return [
+        "doorbell", "front door", "frontdoor", "front-door",
+        "bell", "door", "db1", "db1a", "rlc-db1", "rlc-db1a"
+    ]
+}
+
+private boolean isDoorbellName(String nm) {
+    def lower = (nm ?: "").toLowerCase()
+    return doorbellPatterns().any { p -> lower.contains(p) }
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// Authentication (unchanged)
+// ═════════════════════════════════════════════════════════════════════════
+private void ensureToken() {
+    if (!state.token || now() > (state.tokenExpiry - 60000L)) login()
+}
+
+private boolean login() {
+    def body = toJson([
+        [ cmd: "Login", action: 0, param: [ User: [ userName: camUsername, password: camPassword ] ] ]
+    ])
+    def response = doHttpPost(buildUriWithCreds("Login"), body)
+    if (!response) { setOnline(false); return false }
+    try {
+        def result = parseJson(response)[0]
+        if (result?.code == 0) {
+            state.token = result.value.Token.name
+            state.tokenExpiry = now() + ((result.value.Token.leaseTime ?: 3600) * 1000L)
+            setOnline(true)
+            return true
+        }
+    } catch (e) {
+        log.error "Reolink NVR App: login error — ${e}"
+    }
+    setOnline(false)
+    return false
+}
+
+private void setOnline(boolean isOnline) {
+    if (state.online == isOnline) return
+    state.online = isOnline
+    getChildDevices().each { it.sendEvent(name: "cameraOnline", value: isOnline.toString()) }
+}
+
+private boolean isSessionError(String responseText) {
+    if (!responseText) return false
+    try {
+        def parsed = parseJson(responseText)
+        def entry = (parsed instanceof List) ? parsed[0] : parsed
+        return (entry?.error?.rspCode == -6)
+    } catch (e) {
+        return false
+    }
+}
+
+private String doAuthedPost(String cmd, Integer ch, Map paramMap) {
+    ensureToken()
+    String uri = (ch != null) ? buildUri(cmd, ch) : buildUriGlobal(cmd)
+    String body = toJson([[ cmd: cmd, action: 0, param: paramMap ]])
+    String response = doHttpPost(uri, body)
+    if (isSessionError(response)) {
+        logDebug "doAuthedPost: session rejected for ${cmd}, forcing re-login and retrying once."
+        state.token = null
+        if (login()) {
+            uri = (ch != null) ? buildUri(cmd, ch) : buildUriGlobal(cmd)
+            response = doHttpPost(uri, body)
+        }
+    }
+    return response
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+// HTTP Helpers (unchanged)
+// ═════════════════════════════════════════════════════════════════════════
+private String buildUri(String cmd, Integer ch) {
+    def tok = state?.token ?: ""
+    return "http://${ipAddress}/cgi-bin/api.cgi?cmd=${cmd}&channel=${ch}&token=${tok}"
+}
+
+private String buildUriWithCreds(String cmd) {
+    return "http://${ipAddress}/cgi-bin/api.cgi?cmd=${cmd}"
+}
+
+private String buildUriGlobal(String cmd) {
+    def tok = state?.token ?: ""
+    return "http://${ipAddress}/cgi-bin/api.cgi?cmd=${cmd}&token=${tok}"
+}
+
+private String doHttpPost(String uri, String bodyStr) {
+    def result = null
+    try {
+        logDebug "HTTP POST → ${uri}"
+        httpPost([
+            uri: uri,
+            contentType: "application/json",
+            requestContentType: "application/json",
+            body: bodyStr,
+            timeout: 10
+        ]) { resp ->
+            if (resp.status == 200) {
+                if (resp.data instanceof Map || resp.data instanceof List) {
+                    result = toJson(resp.data)
+                } else {
+                    result = resp.data.toString()
+                }
+            }
+        }
+    } catch (e) {
+        log.warn "Reolink NVR App: HTTP error — ${e}"
+    }
+    return result
+}
+
+private def parseJson(String text) {
+    if (!text) return null
+    return new JsonSlurper().parseText(text)
+}
+
+private String toJson(obj) {
+    return JsonOutput.toJson(obj)
+}
+
+private String timestampNow() {
+    try {
+        return new Date().format("MMM dd, yyyy h:mm:ss a", location.timeZone)
+    } catch (e) {
+        return new Date().format("MMM dd, yyyy h:mm:ss a")
+    }
+}
+
+private void logDebug(msg) {
+    if (logEnable) log.debug "Reolink NVR App: ${msg}"
+}
