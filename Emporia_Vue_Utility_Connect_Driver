@@ -1,29 +1,18 @@
 /**
- *  Emporia Vue Utility Connect Driver
+ *  Emporia Vue Utility Connect Driver (Fixed Token Refresh Version)
  *
- *  Licensed under the Apache License, Version 2.0 (the "License"); you may not use this file except
- *  in compliance with the License. You may obtain a copy of the License at:
+ *  Licensed under the Apache License, Version 2.2
  *
- *      http://www.apache.org/licenses/LICENSE-2.0
- *
- *  Unless required by applicable law or agreed to in writing, software distributed under the License is distributed
- *  on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License
- *  for the specific language governing permissions and limitations under the License.
- *
- *  Special thanks goes to ke7lvb who created the original Emporia Vue driver for Hubitat that the majority of this driver code is leveraged.
- *  The original Emporia Vue driver is available at https://github.com/ke7lvb/Emporia-Vue-Hubitat
- *  Emporia does not have an official API and this driver may stop working at any time
- *
- *  The main purpose of this driver is to specifically pull the same energy usage information from the Emporia Vue Utility Connect device (https://shop.emporiaenergy.com/products/utility-connect) that
- *  is displayed in the Emporia Vue Mobile App e.g. Amps being sent/consumed to the grid that can then be used in Hubitat Rules to control other devices. For example, if the Meter reads - 30 AMPs due to Solar Production
- *  then set my car charger to 20 amps and charge the car until the Meter shows I'm consuming power from the grid instead of sending power to the grid.
- *
- * Change History:
+ *  Original credit: ke7lvb
+ *  Enhancements: gomce62
+ *  Change History:
  *
  *    Date        Who            What
  *    ----        ---            ----
  *   12-21-24    gomce62       Initial release
  *   01-07024    gomce62	   Added code to get EmporiaVue API Tokens based on code contributions from @amithalp and @ke7lvb
+ * 	 7-23-2026	gomce62        Updated Token refresh to meet current Emporia Vue API standards
+ * 	 8-31-2026	gomce62        Fixed ByteArrayInputStream parsing issue in generateToken and refreshToken
  */
 
 import groovy.json.*
@@ -39,19 +28,16 @@ metadata {
     ){
         capability "Actuator"
         capability "Refresh"
-        
         capability "PowerSource"
         capability "PowerMeter"
         capability "EnergyMeter"
-        
-        
-        
+
         command "authToken", [[name: "Update Authtoken*", type: "STRING"]]
         command "getDeviceGid"
         command "generateToken"
         command "refreshToken"
-        
-        attribute "tokenExpiry", "string"        
+
+        attribute "tokenExpiry", "string"
         attribute "lastUpdate", "string"
         attribute "KilowattHours", "number"
         attribute "Dollars", "number"
@@ -60,14 +46,16 @@ metadata {
         attribute "GallonsOfGas", "number"
         attribute "MilesDriven", "number"
         attribute "Carbon", "number"
-        attribute "Scale", "string"  
+        attribute "Scale", "string"
     }
+
     preferences {
-        input name: "logEnable", type: "bool", title: "Enable Info logging", defaultValue: true, description: ""
-        input name: "debugLog", type: "bool", title: "Enable Debug logging", defaultValue: true, description: ""
-        input name: "jsonState", type: "bool", title: "Show JSON state", defaultValue: true, description: ""
+        input name: "logEnable", type: "bool", title: "Enable Info logging", defaultValue: true
+        input name: "debugLog", type: "bool", title: "Enable Debug logging", defaultValue: true
+        input name: "jsonState", type: "bool", title: "Show JSON state", defaultValue: true
         input name: "email", type: "string", title: "Emporia Email", required: true
         input name: "password", type: "password", title: "Emporia Password", required: true
+
         input("scale", "enum", title: "Scale", options: [
             ["1S": "1 Second"],
             ["1MIN": "1 Minute"],
@@ -77,6 +65,7 @@ metadata {
             ["1Mon": "1 Month"],
             ["1Y": "1 Year"]
         ], required: true, defaultValue: "1H")
+
         input("refresh_interval", "enum", title: "How often to refresh the Emporia data", options: [
             0: "Do NOT update",
             1: "1 Minute",
@@ -91,48 +80,62 @@ metadata {
     }
 }
 
-def version(){ return "2.0.0" }
+def version(){ return "2.0.2-fixed" }
 
 def installed(){
     if(logEnable) log.info "Driver installed"
     state.version = version()
     state.deviceGID = []
     state.deviceNames = []
+    scheduleTokenRefresh()
 }
 
 def uninstalled() {
-    unschedule(refresh)
+    unschedule()
     if(logEnable) log.info "Driver uninstalled"
 }
 
 def updated(){
     if (logEnable) log.info "Settings updated"
+
     if (settings.refresh_interval != "0") {
         if (settings.refresh_interval == "60") {
             schedule("7 0 * ? * * *", refresh, [overwrite: true])
         } else {
             schedule("7 */${settings.refresh_interval} * ? * *", refresh, [overwrite: true])
         }
-    }else{
+    } else {
         unschedule(refresh)
     }
-    state.version = version()
-    sendEvent(name: "Scale", value: scale)  
-    if(jsonState == false){
-        state.remove("JSON")
+
+    sendEvent(name: "Scale", value: scale)
+
+    if (!jsonState) state.remove("JSON")
+
+    scheduleTokenRefresh()
+}
+
+/* ---------------------------------------------------------
+   FIXED TOKEN REFRESH SYSTEM
+--------------------------------------------------------- */
+
+def scheduleTokenRefresh() {
+    if (!state.tokenExpiry) return
+
+    unschedule("refreshToken")
+
+    long msUntilRefresh = state.tokenExpiry - now() - 300000  // 5 minutes early
+
+    if (msUntilRefresh < 0) {
+        log.warn "Token expired or near expiry — refreshing immediately"
+        runIn(2, "refreshToken")
+        return
     }
 
-    // Schedule token refresh
-    if (state.tokenExpiry) {
-        def refreshTime = (state.tokenExpiry - now() - 300000) / 1000 // Refresh 5 minutes before expiry
-        runIn(refreshTime.toInteger(), refreshToken)
-        if (logEnable) log.info "Token refresh scheduled in ${refreshTime.toInteger()} seconds"
-    }
+    int seconds = (int)(msUntilRefresh / 1000)
 
-    state.version = version()
-    if (!jsonState) {
-        state.remove("JSON")
-    }
+    log.info "Scheduling token refresh in ${seconds} seconds"
+    runIn(seconds, "refreshToken")
 }
 
 def generateToken() {
@@ -149,26 +152,32 @@ def generateToken() {
             PASSWORD: settings.password
         ]
     ])
-    def params = [uri: authEndpoint, headers: headers, body: body]
+
     try {
-        httpPost(params) { resp ->
+        httpPost([uri: authEndpoint, headers: headers, body: body, requestContentType: "application/json"]) { resp ->
             if (resp.status == 200) {
-                def responseText = resp.getData().getText('UTF-8')
-                def responseData = new JsonSlurper().parseText(responseText)
-                if (responseData.AuthenticationResult) {
-                    state.idToken = responseData.AuthenticationResult.IdToken
-                    state.accessToken = responseData.AuthenticationResult.AccessToken
-                    state.refreshToken = responseData.AuthenticationResult.RefreshToken
-                    state.tokenExpiry = now() + (responseData.AuthenticationResult.ExpiresIn * 1000)
-                    sendEvent(name: "tokenExpiry", value: new Date(state.tokenExpiry).format("yyyy-MM-dd'T'HH:mm:ss'Z'"))
-                    if (logEnable) log.info "Token generated successfully. ID Token: ${state.idToken}"
-                    updated() // Trigger updated to schedule refresh
+                def responseData = (resp.data instanceof java.io.InputStream) ? 
+                    new JsonSlurper().parse(resp.data) : resp.data
+
+                if (responseData?.AuthenticationResult) {
+                    def ar = responseData.AuthenticationResult
+
+                    state.idToken = ar.IdToken
+                    state.accessToken = ar.AccessToken
+                    state.refreshToken = ar.RefreshToken ?: state.refreshToken
+                    state.tokenExpiry = now() + (ar.ExpiresIn * 1000)
+
+                    sendEvent(name: "tokenExpiry",
+                        value: new Date(state.tokenExpiry).format("yyyy-MM-dd'T'HH:mm:ss'Z'")
+                    )
+
+                    log.info "Token generated successfully"
+                    scheduleTokenRefresh()
                 } else {
-                    log.error "AuthenticationResult missing in response. Response: ${responseData}"
+                    log.error "AuthenticationResult missing: ${responseData}"
                 }
             } else {
-                log.error "Failed to generate token. HTTP status: ${resp.status}"
-                if (debugLog) log.debug "Response data: ${resp.getData().getText('UTF-8')}"
+                log.error "Failed to generate token: HTTP ${resp.status}"
             }
         }
     } catch (e) {
@@ -189,25 +198,31 @@ def refreshToken() {
             REFRESH_TOKEN: state.refreshToken
         ]
     ])
-    def params = [uri: authEndpoint, headers: headers, body: body]
+
     try {
-        httpPost(params) { resp ->
+        httpPost([uri: authEndpoint, headers: headers, body: body, requestContentType: "application/json"]) { resp ->
             if (resp.status == 200) {
-                def responseText = resp.getData().getText('UTF-8')
-                def responseData = new JsonSlurper().parseText(responseText)
-                if (responseData.AuthenticationResult) {
-                    state.idToken = responseData.AuthenticationResult.IdToken
-                    state.accessToken = responseData.AuthenticationResult.AccessToken
-                    state.tokenExpiry = now() + (responseData.AuthenticationResult.ExpiresIn * 1000)
-                    sendEvent(name: "tokenExpiry", value: new Date(state.tokenExpiry).format("yyyy-MM-dd'T'HH:mm:ss'Z'"))
-                    log.info "Token refreshed successfully. New ID Token: ${state.idToken}"
-                    updated() // Trigger updated to reschedule refresh
+                def responseData = (resp.data instanceof java.io.InputStream) ? 
+                    new JsonSlurper().parse(resp.data) : resp.data
+
+                if (responseData?.AuthenticationResult) {
+                    def ar = responseData.AuthenticationResult
+
+                    state.idToken = ar.IdToken
+                    state.accessToken = ar.AccessToken
+                    state.tokenExpiry = now() + (ar.ExpiresIn * 1000)
+
+                    sendEvent(name: "tokenExpiry",
+                        value: new Date(state.tokenExpiry).format("yyyy-MM-dd'T'HH:mm:ss'Z'")
+                    )
+
+                    log.info "Token refreshed successfully"
+                    scheduleTokenRefresh()
                 } else {
-                    log.error "AuthenticationResult missing in refresh response. Response: ${responseData}"
+                    log.error "Missing AuthenticationResult in refresh response"
                 }
             } else {
-                log.error "Failed to refresh token. HTTP status: ${resp.status}"
-                if (debugLog) log.debug "Response data: ${resp.getData().getText('UTF-8')}"
+                log.error "Failed to refresh token: HTTP ${resp.status}"
             }
         }
     } catch (e) {
@@ -215,119 +230,111 @@ def refreshToken() {
     }
 }
 
+/* ---------------------------------------------------------
+   DEVICE + ENERGY REFRESH LOGIC
+--------------------------------------------------------- */
 
 def getDeviceGid() {
     def host = "https://api.emporiaenergy.com/"
     def command = "customers/devices"
+
     try {
-        def response = httpGet([uri: "${host}${command}", headers: ['authtoken': state.idToken]]) { resp -> resp.data }
-        if (debugLog) log.debug JsonOutput.toJson(response.devices)
-        def deviceGID = []
-        def deviceNames = []
-        response.devices.each { value ->
-            if (debugLog) log.debug value.deviceGid
-            deviceGID.add(value.deviceGid)
-            value.devices.channels.each { next_value ->
-                deviceNames.add(next_value.name)
+        httpGet([uri: "${host}${command}", headers: ['authtoken': state.idToken]]) { resp ->
+            def response = resp.data
+
+            def deviceGID = []
+            def deviceNames = []
+
+            response.devices.each { dev ->
+                deviceGID.add(dev.deviceGid)
+
+                dev.channels.each { ch ->
+                    if (ch.name) deviceNames.add(ch.name)
+                }
             }
+
+            state.deviceGID = deviceGID
+            state.deviceNames = deviceNames
+
+            log.info "Device GID updated: ${deviceGID}"
         }
-        state.deviceGID = deviceGID
-        state.deviceNames = deviceNames - null - ''
     } catch (e) {
         log.error "Error fetching device GID: ${e.message}"
     }
 }
 
 def refresh() {
-    if (state.deviceGID) {
-        def Gid_string = state.deviceGID.join("+")
-        def outputTZ = TimeZone.getTimeZone('UTC')
-        def instant = new Date().format("yyyy-MM-dd'T'HH:mm:ss'Z'", outputTZ)
-        def host = "https://api.emporiaenergy.com/"
-
-        ["KilowattHours", "Dollars", "AmpHours", "Trees", "GallonsOfGas", "MilesDriven", "Carbon"].each { energyUnit ->
-            attemptRefresh([host: host, Gid_string: Gid_string, instant: instant, energyUnit: energyUnit, attempts: 0])
-        }
-
-        def now = new Date()
-        def dateFormat = new SimpleDateFormat("MM-dd-yyyy h:mm:ss a")
-        def formattedDate = dateFormat.format(now)
-        state.lastUpdate = formattedDate
-        sendEvent(name: "lastUpdate", value: formattedDate)
-    } else {
-        log.info "Device GID not found. Please refresh Authtoken and getDeviceGid"
+    if (!state.deviceGID) {
+        log.info "Device GID not found. Please generate token and run getDeviceGid()"
+        return
     }
+
+    def Gid_string = state.deviceGID.join("+")
+    def instant = new Date().format("yyyy-MM-dd'T'HH:mm:ss'Z'", TimeZone.getTimeZone('UTC'))
+    def host = "https://api.emporiaenergy.com/"
+
+    ["KilowattHours", "Dollars", "AmpHours", "Trees", "GallonsOfGas", "MilesDriven", "Carbon"].each { energyUnit ->
+        attemptRefresh([host: host, Gid_string: Gid_string, instant: instant, energyUnit: energyUnit, attempts: 0])
+    }
+
+    def formattedDate = new SimpleDateFormat("MM-dd-yyyy h:mm:ss a").format(new Date())
+    state.lastUpdate = formattedDate
+    sendEvent(name: "lastUpdate", value: formattedDate)
 }
 
-
 def attemptRefresh(params) {
-    def host = params.host
-    def Gid_string = params.Gid_string
-    def instant = params.instant
-    def energyUnit = params.energyUnit
-    def attempts = params.attempts
+    def command = "AppAPI?apiMethod=getDeviceListUsages&deviceGids=${params.Gid_string}&instant=${params.instant}&scale=${scale}&energyUnit=${params.energyUnit}"
 
-    def command = "AppAPI?apiMethod=getDeviceListUsages&deviceGids=${Gid_string}&instant=${instant}&scale=${scale}&energyUnit=${energyUnit}"
-    if (debugLog) log.debug "${host}${command}"
-    
-    def JSON = httpGet([uri: "${host}${command}", headers: ['authtoken': state.idToken]]) { resp -> resp.data }
-    if (jsonState) {
-        state.JSON = JsonOutput.toJson(JSON)
-    }
-    def devices = JSON.deviceListUsages.devices
+    def JSON = httpGet([uri: "${params.host}${command}", headers: ['authtoken': state.idToken]]) { resp -> resp.data }
+
+    if (jsonState) state.JSON = JsonOutput.toJson(JSON)
+
     def combinedTotals = 0
     def needsRetry = false
 
-    // The EmporiaVue API sometimes returns a null value due to the server being busy.
-    // The following code attempts another refresh for up to 5 tries after waiting 10 seconds.
-    devices.each { value ->
+    JSON.deviceListUsages.devices.each { value ->
         value.channelUsages.each { next_value ->
             def usage = next_value.usage
-            if (debugLog) log.debug next_value
+
             if (usage == null) {
-                if (debugLog) log.debug "Null value encountered on ${next_value.name}, attempting another refresh"
-                needsRetry = true
-                if (attempts < 6) {
-                    runIn(10, attemptRefresh, [overwrite: false, data: [host: host, Gid_string: Gid_string, instant: instant, energyUnit: energyUnit, attempts: attempts + 1]])
+                if (params.attempts < 6) {
+                    runIn(10, attemptRefresh, [overwrite: false, data: [host: params.host, Gid_string: params.Gid_string, instant: params.instant, energyUnit: params.energyUnit, attempts: params.attempts + 1]])
+                    needsRetry = true
                     return
                 } else {
-                    log.error "Null value encountered on ${next_value.name} after 5 attempts. Check EmporiaVue Mobile App to see if device is online"
+                    log.error "Null usage after 5 attempts on ${next_value.name}"
                     return
                 }
             }
+
             def Wh = roundToTwoDecimalPlaces(convertToWh(usage) ?: 0)
             combinedTotals += Wh
         }
     }
+
     if (!needsRetry) {
-        sendEvent(name: energyUnit, value: "${roundToTwoDecimalPlaces(combinedTotals / 1000)}")
+        sendEvent(name: params.energyUnit, value: "${roundToTwoDecimalPlaces(combinedTotals / 1000)}")
     }
 }
 
-    
-// Placeholder method for rounding to two decimal places
 def roundToTwoDecimalPlaces(value) {
     return Math.round(value * 100) / 100
 }
 
-
-
 def authToken(token) {
     state.idToken = token
-    now = new Date().format("yyyy-MM-dd'T'HH:mm:ss'Z'")
-    state.lastTokenUpdate = timeToday(now)
+    state.lastTokenUpdate = new Date()
 }
 
 def convertToWh(usage) {
-    if (usage != null) {
-        switch(scale) {
-            case "1S":
-                return Math.round(usage * 60 * 60 * 1000)
-            case "1MIN":
-                return Math.round(usage * 60 * 1000)
-            default:
-                return Math.round(usage * 1000)
-        }
+    if (usage == null) return null
+
+    switch(scale) {
+        case "1S":
+            return Math.round(usage * 60 * 60 * 1000)
+        case "1MIN":
+            return Math.round(usage * 60 * 1000)
+        default:
+            return Math.round(usage * 1000)
     }
 }
-
