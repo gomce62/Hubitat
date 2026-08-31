@@ -1,0 +1,170 @@
+/**
+ * Reolink Doorbell (Auto-Detect NVR Channel) — Component Driver
+ * Author: Chris Feduniw + Grok and Gemini AI
+ * Namespace: gomce62
+ *
+ * Thin component driver, designed to be created and managed by the
+ * "Reolink NVR (Service Manager)" app. It holds NO credentials and makes
+ * NO HTTP calls itself — every command forwards to the parent app
+ * (parent.componentX(device)), which owns the shared login/token and does
+ * all NVR communication, including detecting which NVR channel this
+ * doorbell lives on. This driver only handles local, no-network logic:
+ * attributes and the motion-reset timer.
+ *
+ * NOTE: Reolink's local api.cgi does not expose a real doorbell
+ * button-press event (confirmed against Reolink community/support
+ * threads — motion/AI detection is pollable, but the button press itself
+ * is not). 
+ *
+ * Not really usable standalone (it has no way to reach the NVR without a
+ * parent app), so add it only via the service manager app's discovery page.
+ *
+ *    Date        Who            What
+ *    ----        ---            ----
+ *   8/31/26    gomce62       Initial release
+*/
+
+metadata {
+    definition(
+        name:      "Reolink Doorbell (Auto-Detect NVR Channel)",
+        namespace: "gomce62",
+        author:    "Chris Feduniw + Grok and Gemini AIt",
+        importUrl:"",
+        description: "Reolink doorbell component driver. Requires the Reolink NVR (Service Manager) app as its parent."
+    ) {
+        capability "MotionSensor"
+        capability "Switch"
+        capability "Refresh"
+       
+        command "irEnable"
+        command "irDisable"
+        command "pollMotion"
+        command "pushNotificationsOn"
+        command "pushNotificationsOff"
+
+        
+        attribute "irLed",               "string"
+        attribute "spotlight",           "string"
+        attribute "lastMotionTime",      "string"
+        attribute "lastMotionType",      "string"
+        attribute "cameraOnline",        "string"
+        attribute "cameraName",          "string"
+        attribute "cameraChannel",       "string"
+        attribute "pushNotifications",   "string"
+    }
+
+    preferences {
+        input name: "motionResetTime", type: "number", title: "Motion Reset Delay (seconds)",
+            defaultValue: 30, range: "5..300"
+        input name: "logEnable", type: "bool", title: "Enable Debug Logging", defaultValue: false
+        input name: "txtLogEnable", type: "bool", title: "Enable Descriptive Text Logging", defaultValue: true
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
+
+def installed() {
+    log.info "${device.displayName}: Installed."
+    initialize()
+}
+
+def updated() {
+    log.info "${device.displayName}: Preferences updated."
+    unschedule()
+    if (logEnable) runIn(1800, "logsOff")
+    initialize()
+}
+
+def logsOff() {
+    log.warn "${device.displayName}: Debug logging disabled automatically."
+    device.updateSetting("logEnable", [value: "false", type: "bool"])
+}
+
+def initialize() {
+    sendEvent(name: "motion", value: "inactive")
+    if (!device.currentValue("pushNotifications")) {
+        sendEvent(name: "pushNotifications", value: "unknown")
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Commands — all forward to the parent app, which owns login/token/HTTP
+// ---------------------------------------------------------------------------
+def refresh() {
+    logDebug "refresh() → parent.componentRefresh() + parent.componentPollMotion()"
+    parent?.componentRefresh(device)
+    parent?.componentPollMotion(device)
+}
+
+def on()  { logDebug "on() → parent.componentOn()";  parent?.componentOn(device) }
+def off() { logDebug "off() → parent.componentOff()"; parent?.componentOff(device) }
+
+def irEnable()  { logDebug "irEnable() → parent.componentIrEnable()";  parent?.componentIrEnable(device) }
+def irDisable() { logDebug "irDisable() → parent.componentIrDisable()"; parent?.componentIrDisable(device) }
+
+def pollMotion() { logDebug "pollMotion() → parent.componentPollMotion()"; parent?.componentPollMotion(device) }
+
+def pushNotificationsOn()  { logDebug "pushNotificationsOn() → parent.componentPushOn()";  parent?.componentPushOn(device) }
+def pushNotificationsOff() { logDebug "pushNotificationsOff() → parent.componentPushOff()"; parent?.componentPushOff(device) }
+
+
+// ---------------------------------------------------------------------------
+// Called BY the parent app after each poll — purely local, no HTTP
+// ---------------------------------------------------------------------------
+
+void parseMotionState(Map data) {
+    if (!data?.active) return
+
+    boolean wasActive = (device.currentValue("motion") == "active")
+    String currentType = device.currentValue("lastMotionType")
+
+    // Timestamp refreshes on every detection so "last motion" always reflects
+    // the most recent sighting during a sustained/ongoing event.
+    sendEvent(name: "lastMotionTime", value: timestampNow())
+
+    if (!wasActive) {
+        // Start of a new session — whatever was detected first.
+        sendEvent(name: "lastMotionType", value: data.type)
+        logDebug "parseMotionState: motion became active, type='${data.type}'"
+    } else if (data.aiPerson == true && currentType != "person") {
+        // A person can appear partway through an already-active session (e.g. a
+        // brief misfire like "animal" kicked off the session, then someone
+        // actually walked up seconds later without a full reset in between).
+        // Person detection always wins and sticks for the rest of the session,
+        // since that's almost always what actually matters for a doorbell.
+        sendEvent(name: "lastMotionType", value: "person")
+        logDebug "parseMotionState: upgrading type to 'person' mid-session (was '${currentType}')"
+    }
+
+    if (!wasActive) {
+        sendEvent(name: "motion", value: "active")
+    }
+
+    unschedule("resetMotion")
+    runIn((motionResetTime ?: 30).toInteger(), "resetMotion")
+}
+
+def resetMotion() {
+    sendEvent(name: "motion", value: "inactive")
+}
+
+// ---------------------------------------------------------------------------
+// Logging
+// ---------------------------------------------------------------------------
+
+private String timestampNow() {
+    // location.timeZone can be null if the hub's location isn't fully configured
+    // (Settings -> Location). Fall back to the system default rather than
+    // throwing and silently killing the sendEvent that would follow.
+    try {
+        return new Date().format("MMM dd, yyyy h:mm:ss a", location.timeZone)
+    } catch (e) {
+        return new Date().format("MMM dd, yyyy h:mm:ss a")
+    }
+}
+
+private void logDebug(msg) {
+    if (logEnable) log.debug "${device.displayName}: ${msg}"
+}
